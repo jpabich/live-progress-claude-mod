@@ -65,14 +65,34 @@ const commandKey = (command: string): string => {
   return [...head, ...[...flags].sort()].join(' ')
 }
 
+// A heredoc's lines are the text it feeds a command, not commands: its marker goes, and its lines up to and with the one that ends it
+// (`<<-` lets that one be indented with tabs). Not a here-string (`<<<`), nor a shift (`1<<3`).
+const HEREDOC = /(?<!<)<<(?!<)(-?)\s*(?:'([A-Za-z_]\w*)'|"([A-Za-z_]\w*)"|\\?([A-Za-z_]\w*))/g
+const withoutHeredocs = (command: string): string => {
+  const lines = command.split('\n')
+  const kept: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const ends: Array<{ word: string; tabs: boolean }> = []
+    kept.push(lines[i].replace(HEREDOC, (_, dash: string, s?: string, d?: string, w?: string) => {
+      ends.push({ word: s ?? d ?? w ?? '', tabs: dash === '-' })
+      return ''
+    }))
+    for (const end of ends) {
+      while (++i < lines.length && (end.tabs ? lines[i].replace(/^\t+/, '') : lines[i]) !== end.word);
+    }
+  }
+  return kept.join('\n')
+}
+
 // What a run is learned under: the tool, then each command of the chain as commandKey says, so `./build.ps1 -Target web` and
 // `./build.ps1 -Quick` learn apart, `npm ci` apart from `npm ci && npm run build`, and `git add build.sh` never as build.sh. Quoted
 // text counts for nothing unless it is a script's path (a path before any space in it: `"C:\My Scripts\x.ps1"`, not `"fix a/x.sh"`);
-// a command never counts by the free text beside it. A subagent by its type; anything else by its skill or description.
+// a command never counts by the free text beside it, nor by a heredoc's. A subagent by its type; anything else by its skill or
+// description.
 export const keyOf = (tool: string, e: Record<string, unknown>): string => {
   let what: string
   if (typeof e.command === 'string') {
-    const unquoted = e.command.replace(/"([^"]*)"|'([^']*)'/g, (_, d?: string, s?: string) => {
+    const unquoted = withoutHeredocs(e.command).replace(/"([^"]*)"|'([^']*)'/g, (_, d?: string, s?: string) => {
       const q = (d ?? s ?? '').replace(/^[&.]\s+/, '')  // `-Command "& ./build.ps1"`, a dot-sourced script
       return SCRIPT.test(q) && /^\S*[\\/]|^\S+$/.test(q) ? q.replace(/^.*[\\/]/, '').replace(/\s+/g, '_') : '""'
     })
@@ -390,7 +410,7 @@ const asked = new Set<string>()  // jobs a permission dialog was put up for: the
 
 // Learned durations live under STORE, keyed by keyOf, each `{ ms, at }`: the typical duration and when it was last taught. A change
 // to what keyOf makes of a command takes a new prefix; session.start clears the old ones and, past MAX_KEYS, the least lately taught.
-const STORE = 'd6:'
+const STORE = 'd7:'
 const OLD_STORE = /^d\d+:/
 const MAX_KEYS = 1000
 

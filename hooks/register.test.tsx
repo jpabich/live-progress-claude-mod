@@ -79,6 +79,21 @@ describe('keyOf', () => {
     expect(keyOf('Bash', { command: 'cd foo', description: 'Go to foo' })).toBe('Bash:')
   })
 
+  test('a heredoc is one command: the text it feeds never counts', () => {
+    expect(bash("cat > \"$SP/a.py\" <<'EOF'\nimport sys\nfrom PIL import Image\nEOF")).toBe('Bash:cat')
+    expect(bash("cat > a.py <<'EOF'\nimport sys\nEOF\npython -I a.py")).toBe(bash("cat > b.py <<'EOF'\nprint(1)\nEOF\npython -I a.py"))
+    expect(bash('cat <<EOF | python3\nprint("a; b && c")\nEOF\nnpm ci')).toBe('Bash:cat && npm ci')
+    expect(bash('cat <<-END\n\tls\n\tEND\nnpm ci')).toBe('Bash:cat && npm ci')
+    expect(bash('git commit -m "$(cat <<\'EOF\'\nFix it\n\nCo-Authored-By: x\nEOF\n)"')).toBe('Bash:git commit -m')
+    expect(bash("python - <<'EOF'\nimport os\n")).toBe('Bash:python')
+    expect(bash('cat<<EOF\nls\nEOF')).toBe('Bash:cat')
+  })
+
+  test('a here-string and a shift are no heredoc', () => {
+    expect(bash('cat <<< "x"\nnpm ci')).toBe('Bash:cat && npm ci')
+    expect(bash('echo $((1<<3))\nnpm ci')).toBe('Bash:echo && npm ci')
+  })
+
   test('a subagent is learned under its type', () => {
     expect(keyOf('Agent', { description: 'Explore the repo', subagent_type: 'Explore' })).toBe('Agent:Explore')
     expect(keyOf('Agent', { description: 'Something else' })).toBe('Agent:general-purpose')
@@ -162,7 +177,7 @@ describe('the terminal Clawd', () => {
 
 test('the terminal band is drawn four times a second', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  mock.store(on, { 'd6:Bash:build.sh': { ms: 60_000, at: 0 } })
+  mock.store(on, { 'd7:Bash:build.sh': { ms: 60_000, at: 0 } })
   on('tool.call', async () => {
     await clock.sleep(10_000)
     return { result: {}, text: 'ok' }
@@ -338,7 +353,7 @@ describe('background tasks', () => {
 
 test('the terminal keeps Clawd inside the bar past the usual time', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  mock.store(on, { 'd6:Bash:build.sh': { ms: 3_000, at: 0 } })
+  mock.store(on, { 'd7:Bash:build.sh': { ms: 3_000, at: 0 } })
   on('tool.call', async () => {
     await clock.sleep(10_000)
     return { result: {}, text: 'ok' }
@@ -368,7 +383,7 @@ test('the terminal keeps Clawd inside the bar past the usual time', async ($, on
 
 test('a client attaching or leaving gets its pictures made anew', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  mock.store(on, { 'd6:Bash:build.sh': { ms: 600_000, at: 0 } })
+  mock.store(on, { 'd7:Bash:build.sh': { ms: 600_000, at: 0 } })
   on('tool.call', async () => {
     await clock.sleep(60_000)
     return { result: {}, text: 'ok' }
@@ -546,7 +561,7 @@ describe('what a run teaches and when a job goes', () => {
 
   test('the terminal band shows as many jobs as fit its rows, the latest', async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
-    mock.store(on, { 'd6:Bash:one.sh': { ms: 600_000, at: 0 }, 'd6:Bash:two.sh': { ms: 600_000, at: 0 }, 'd6:Bash:three.sh': { ms: 600_000, at: 0 } })
+    mock.store(on, { 'd7:Bash:one.sh': { ms: 600_000, at: 0 }, 'd7:Bash:two.sh': { ms: 600_000, at: 0 }, 'd7:Bash:three.sh': { ms: 600_000, at: 0 } })
     on('tool.call', async () => {
       await clock.sleep(60_000)
       return { result: {}, text: 'ok' }
@@ -582,7 +597,7 @@ test('the desktop picture stays under the Svg source limit', () => {
 
 test('a typed prompt shows the hidden band again', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  mock.store(on, { 'd6:Bash:build.sh': { ms: 60_000, at: 0 } })
+  mock.store(on, { 'd7:Bash:build.sh': { ms: 60_000, at: 0 } })
   on('tool.call', async () => {
     await clock.sleep(10_000)
     return { result: {}, text: 'ok' }
