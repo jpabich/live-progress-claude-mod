@@ -1,6 +1,8 @@
 export type Job = {
   /** the tool call's id, or a background task's id */
   id: string
+  /** a background job's: the tool call that started it, which its notification may name instead of the task's id */
+  callId?: string
   kind: 'tool' | 'background' | 'agent'
   label: string
   /** the history key its duration is learned under */

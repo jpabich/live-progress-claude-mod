@@ -10,56 +10,72 @@ const jobs = atom({ plugin: 'live-progress', key: 'jobs' } as const, [] as Job[]
 const now = atom({ plugin: 'live-progress', key: 'now' } as const, 0)
 const isHidden = atom({ plugin: 'live-progress', key: 'isHidden' } as const, false)
 const urgency = atom({ plugin: 'live-progress', key: 'urgency' } as const, '#5aa55a')  // the frame's colour
-const redraw = atom({ plugin: 'live-progress', key: 'redraw' } as const, 0)  // bumped to draw the band again with fresh pictures
+const redraw = atom({ plugin: 'live-progress', key: 'redraw' } as const, 0)  // bumped to draw the band again
 
 const QUICK = new Set(['Read', 'Glob', 'Grep', 'Edit', 'Write', 'TodoWrite', 'ToolSearch'])  // too short to show
 const SHOWN = 4
 const BAR_CELLS = 32  // the terminal bar's length, in cells
+const SHOW_AFTER_MS = 2000  // a job shows once it has run this long, or at once when its kind usually takes longer
+const NEAR = 0.85  // the share of the usual time from which a job is near its end
 
-const SCRIPT = /[\w./\\:-]+\.(?:ps1|psm1|py|sh|bash|zsh|js|mjs|cjs|ts|rb|pl|php|gd|bat|cmd)\b/i
-const SUBCOMMAND = /^[a-z][\w:.-]*$/i  // `build`, `run`, `test:unit`
-const FLAG_VALUE = /^[\w./\\:-]{1,32}$/  // a flag's value kept in the key: a word or a short path, never free text
+const SCRIPT = /\.(?:ps1|psm1|py|sh|bash|zsh|js|mjs|cjs|ts|rb|pl|php|gd|bat|cmd)$/i  // a word naming a script
+const INTERPRETERS = new Set(['python', 'python3', 'py', 'node', 'bun', 'deno', 'tsx', 'ts-node', 'bash', 'sh', 'zsh', 'pwsh', 'powershell', 'ruby', 'perl', 'php', 'godot', 'cmd'])
+const NAVIGATION = new Set(['cd', 'pushd', 'popd', 'set-location', 'push-location', 'pop-location', 'sl'])
+const SUBCOMMAND = /^[a-z][\w:-]*$/i  // `build`, `run`, `test:unit`; never a file name
+const FLAG_VALUE = /^[a-z][a-z._/\\:-]{0,31}$/i  // a flag's value kept in the key: a mode or a path without digits, never a per-run value
 
-// What a run is learned under: the tool, then the script it runs (its file name) or the program and up to two subcommands, then
-// the flags it is given, with their values when short, sorted. So `./build.ps1 -Target web` and `./build.ps1 -Quick` learn apart,
-// and `npm run build` apart from `npm run test`. Only the first command of a chain counts, once `cd … &&`, `FOO=1 `, a PowerShell
-// `$x = ` or `& ` and `uv run [--project …]` are taken off. Without a command: the tool's description or skill.
+// One command of a chain: the script it runs (its file name) when the command is the script or an interpreter running one, else the
+// program and up to two subcommands; then its flags, with their values when they name a mode or a place, sorted. A pipeline counts by
+// its first program; `cd`, `Set-Location` and the like count for nothing.
+const commandKey = (command: string): string => {
+  const c = command.split('|')[0].trim()
+    .replace(/^\$\w+\s*=\s*/, '').replace(/^&\s*/, '')
+    .replace(/^(?:\w+=\S*\s+)+/, '')
+    .replace(/^uv run(?:\s+--project\s+\S+)?\s+/, '')
+  const words = c.split(/\s+/).filter(w => w !== '')
+  if (words.length === 0) return ''
+  const program = words[0].replace(/^.*[\\/]/, '').replace(/\.exe$/i, '')
+  if (NAVIGATION.has(program.toLowerCase())) return ''
+  const at = SCRIPT.test(words[0]) ? 0
+    : INTERPRETERS.has(program.toLowerCase()) ? words.findIndex((w, i) => i > 0 && SCRIPT.test(w)) : -1
+  let head: string[]
+  let rest: string[]
+  if (at >= 0) {
+    head = [words[at].replace(/^.*[\\/]/, '')]
+    rest = words.slice(at + 1)
+  } else {
+    let n = 1
+    while (n < 3 && n < words.length && SUBCOMMAND.test(words[n])) n++
+    head = [program, ...words.slice(1, n)]
+    rest = words.slice(n)
+  }
+  const flags = new Set<string>()
+  rest.forEach((w, i) => {
+    if (!/^--?[a-z]/i.test(w)) return
+    const eq = w.indexOf('=')
+    const name = eq < 0 ? w : w.slice(0, eq)
+    const after = rest[i + 1]
+    const value = eq >= 0 ? w.slice(eq + 1) : after !== undefined && !after.startsWith('-') ? after : undefined
+    flags.add(value !== undefined && FLAG_VALUE.test(value) ? `${name} ${value}` : name)
+  })
+  return [...head, ...[...flags].sort()].join(' ')
+}
+
+// What a run is learned under: the tool, then each command of the chain as commandKey says, so `./build.ps1 -Target web` and
+// `./build.ps1 -Quick` learn apart, `npm ci` apart from `npm ci && npm run build`, and `git add build.sh` never as build.sh. Quoted
+// text counts for nothing unless it is a script's path. A subagent by its type; anything else by its skill or description.
 export const keyOf = (tool: string, e: Record<string, unknown>): string => {
   let what = ''
   if (typeof e.command === 'string') {
-    const c = e.command
-      .replace(/"([^"]*)"|'([^']*)'/g, (_, d?: string, s?: string) => (SCRIPT.test(d ?? s ?? '') ? (d ?? s ?? '') : '""'))
-      .trim()
-      .replace(/^cd\s+\S+\s*(?:&&|;)\s*/, '')
-      .split(/\s*(?:&&|\|\||[|;\n])\s*/)[0]
-      .replace(/^\$\w+\s*=\s*/, '').replace(/^&\s*/, '')
-      .replace(/^(?:\w+=\S*\s+)+/, '')
-      .replace(/^uv run(?:\s+--project\s+\S+)?\s+/, '')
-    const words = c.split(/\s+/).filter(w => w !== '')
-    const at = words.findIndex(w => SCRIPT.test(w))
-    let head: string[]
-    let rest: string[]
-    if (at >= 0) {
-      head = [words[at].replace(/^.*[\\/]/, '')]
-      rest = words.slice(at + 1)
-    } else {
-      let n = 1
-      while (n < 3 && n < words.length && SUBCOMMAND.test(words[n])) n++
-      head = words.length > 0 ? [words[0].replace(/^.*[\\/]/, ''), ...words.slice(1, n)] : []
-      rest = words.slice(n)
-    }
-    const flags = new Set<string>()
-    rest.forEach((w, i) => {
-      if (!/^--?[a-z]/i.test(w)) return
-      const eq = w.indexOf('=')
-      const name = eq < 0 ? w : w.slice(0, eq)
-      const after = rest[i + 1]
-      const value = eq >= 0 ? w.slice(eq + 1) : after !== undefined && !after.startsWith('-') ? after : undefined
-      flags.add(value !== undefined && FLAG_VALUE.test(value) ? `${name} ${value}` : name)
+    const unquoted = e.command.replace(/"([^"]*)"|'([^']*)'/g, (_, d?: string, s?: string) => {
+      const q = d ?? s ?? ''
+      return SCRIPT.test(q) && (!/\s/.test(q) || /[\\/]/.test(q)) ? q.replace(/^.*[\\/]/, '').replace(/\s+/g, '_') : '""'
     })
-    what = [...head, ...[...flags].sort()].join(' ')
+    what = unquoted.split(/\s*(?:&&|\|\||;|\n)\s*/).map(commandKey).filter(k => k !== '').join(' && ')
+  } else if (tool === 'Agent') {
+    what = typeof e.subagent_type === 'string' ? e.subagent_type : 'general-purpose'
   }
-  what = what || (typeof e.description === 'string' ? e.description : '') || (typeof e.skill === 'string' ? e.skill : '')
+  what = what || (typeof e.skill === 'string' ? e.skill : '') || (typeof e.description === 'string' ? e.description : '')
   return `${tool}:${what}`.slice(0, 80)
 }
 
@@ -95,8 +111,12 @@ export const progressOf = (job: Job, t: number): Look => {
   const share = elapsed / job.expectedMs
   const left = job.expectedMs - elapsed
   if (left <= 0) return { words: `${clockOf(elapsed)} - ${clockOf(-left)} over the usual ${clockOf(job.expectedMs)}`, mood: 'over', share: 1 }
-  return { words: `${Math.floor(share * 100)}% - ${clockOf(elapsed)} - ETA ${clockOf(left, true)}`, mood: share > 0.85 ? 'near' : 'run', share }
+  return { words: `${Math.floor(share * 100)}% - ${clockOf(elapsed)} - ETA ${clockOf(left, true)}`, mood: share > NEAR ? 'near' : 'run', share }
 }
+
+// Whether a job is worth showing: a quick command comes and goes without opening the band.
+export const isShown = (job: Job, t: number): boolean =>
+  (job.doneAt ?? t) - job.startedAt >= SHOW_AFTER_MS || (job.expectedMs ?? 0) >= SHOW_AFTER_MS
 
 const MOOD_COLOUR: Record<Look['mood'], string> = { run: 'green', near: 'yellow', over: 'red', sleep: 'cyan', done: 'green' }
 
@@ -114,6 +134,7 @@ const ORANGE = '#D97757'
 const RED = '#d9534f'
 const STEP_S = 0.6  // one walk cycle
 const MAX_WORDS = 500  // texts of the words at most
+const SLOW_WORDS = 300  // minute texts a picture spends on the usual time at most: past 5 h, a text each few minutes
 
 // The sprite, 11 x 4 pixels over the legs: B body, E eye (closed for a blink by squashing it).
 const CLAWD_BODY = ['..BBBBBBB..', '..BEBBBEB..', 'BBBBBBBBBBB', '..BBBBBBB..']
@@ -137,27 +158,27 @@ const body = (colour: string): string =>
       `<animate attributeName="x" values="${x * PX};${x * PX};${x * PX - 1.5};${x * PX - 1.5};${x * PX + 1.5};${x * PX + 1.5};${x * PX}" keyTimes="0;0.88;0.9;0.93;0.95;0.98;1" dur="20s" repeatCount="indefinite" calcMode="discrete"/>`))).join('')
 
 // Dust puffs behind his feet as he walks (to the right: the puffs drift left and up and fade).
-const dust = (): string => [0, 1, 2].map(i =>
+const DUST = [0, 1, 2].map(i =>
   `<circle cx="0" cy="${5 * PX}" r="1.6" fill="#b8ad9e" opacity="0">` +
   `<animate attributeName="cx" values="${2 * PX};${2 * PX - 9}" dur="0.9s" begin="${i * 0.3}s" repeatCount="indefinite"/>` +
   `<animate attributeName="cy" values="${5 * PX};${5 * PX - 5}" dur="0.9s" begin="${i * 0.3}s" repeatCount="indefinite"/>` +
   `<animate attributeName="opacity" values="0.8;0" dur="0.9s" begin="${i * 0.3}s" repeatCount="indefinite"/></circle>`).join('')
 
 // Sweat past the usual time: two drops by his head, falling and fading, again and again.
-const sweat = (): string => [[-3, 0], [SPRITE_W + 1, 0.45]].map(([x, d]) =>
+const SWEAT = [[-3, 0], [SPRITE_W + 1, 0.45]].map(([x, d]) =>
   `<ellipse cx="${x}" cy="0" rx="1.4" ry="2.2" fill="#7fc4ff" opacity="0">` +
   `<animate attributeName="cy" values="0;9" dur="0.9s" begin="${d}s" repeatCount="indefinite"/>` +
   `<animate attributeName="opacity" values="1;0" dur="0.9s" begin="${d}s" repeatCount="indefinite"/></ellipse>`).join('')
 
 // Confetti over him at the finish: little squares of colour falling and turning.
-const CONFETTI = ['#ffd23f', '#5aa55a', '#7fc4ff', '#ff8cc6', '#D97757', '#b48cff', '#ffd23f', '#5aa55a']
-const confetti = (): string => CONFETTI.map((c, i) => {
+const CONFETTI = ['#ffd23f', '#5aa55a', '#7fc4ff', '#ff8cc6', '#D97757', '#b48cff', '#ffd23f', '#5aa55a'].map((c, i) => {
   const x = -26 + i * 9
   const d = (i * 0.17) % 1.2
   return `<rect x="${x}" y="-10" width="3" height="3" fill="${c}">` +
     `<animate attributeName="y" values="-12;24" dur="1.3s" begin="${d}s" repeatCount="indefinite"/>` +
     `<animateTransform attributeName="transform" type="rotate" values="0 ${x + 1.5} 6;360 ${x + 1.5} 6" dur="1.3s" begin="${d}s" repeatCount="indefinite"/></rect>`
 }).join('')
+
 const legs = (colour: string, lifted: number[]): string =>
   LEG_X.map((x, i) => lifted.includes(i) ? rect(x * PX + 1.5, 4 * PX - 0.6, PX, PX - 1.4, colour) : rect(x * PX, 4 * PX - 0.6, PX, PX + 1.6, colour)).join('')
 
@@ -169,6 +190,11 @@ const frame = (k: number, inner: string): string => {
 
 const walker = (colour: string): string =>
   STEPS.map((s, k) => frame(k, `<g transform="translate(0 ${s.up ? -1.5 : 0})">${body(colour)}</g>${legs(colour, s.lifted)}`)).join('')
+
+// The sprite's markup depends only on its colour: made once.
+const WALK_ORANGE = walker(ORANGE)
+const WALK_RED = walker(RED)
+const STAND = body(ORANGE) + legs(ORANGE, [])
 
 const text = (words: string, colour: string): string =>
   `<text x="0" y="${CLAWD_H - 6}" font-size="14" font-weight="600" font-family="system-ui, sans-serif" fill="${colour}">${words}</text>`
@@ -198,32 +224,33 @@ export const clawdSvg = (job: Job, t0: number): string => {
   const elapsed = Math.max(0, (job.doneAt ?? t0) - job.startedAt)
   if (job.doneAt !== undefined) {
     const jump = `<animateTransform attributeName="transform" type="translate" values="0 0;0 -${SPRITE_Y};0 0" dur="0.6s" repeatCount="indefinite"/>`
-    return open + placed(1, `<g>${jump}${body(ORANGE)}${legs(ORANGE, [])}</g>${confetti()}`) + track +
+    return open + placed(1, `<g>${jump}${STAND}</g>${CONFETTI}`) + track +
       rect(0, BAR_Y, '100%', BAR_H, FILL_HEX.done, ' rx="4"') + text(`done in ${clockOf(elapsed)}`, FILL_HEX.done) + '</svg>'
   }
   const e = job.expectedMs
   if (e === null || e <= 0) {
     const z = `<text x="${SPRITE_W + 4}" y="2" font-size="13" font-family="monospace" fill="${FILL_HEX.sleep}">z<animate attributeName="opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite"/></text>`
     const sweep = rect(0, BAR_Y, '8%', BAR_H, FILL_HEX.sleep, ' rx="4"', '<animate attributeName="x" values="0%;92%;0%" dur="4s" repeatCount="indefinite"/>')
-    return open + placed(0, `${body(ORANGE)}${legs(ORANGE, [])}${z}`) + track + sweep +
+    return open + placed(0, `${STAND}${z}`) + track + sweep +
       text('first run of its kind: no ETA yet', FILL_HEX.sleep) + '</svg>'
   }
   const left = Math.max(0, (e - elapsed) / 1000)  // seconds to the usual end, from the drawing
   const s0 = Math.min(1, elapsed / e)
-  const near = Math.max(0, (0.85 * e - elapsed) / 1000)
+  const near = Math.max(0, (NEAR * e - elapsed) / 1000)
   // Clawd walks from s0 to the end over `left` seconds, then stays there, red, walking on the spot
-  const red = `<g opacity="${left > 0 ? 0 : 1}">${walker(RED)}${sweat()}${left > 0 ? `<set attributeName="opacity" to="1" begin="${left}s"/>` : ''}</g>`
-  const orange = left > 0 ? `<g>${walker(ORANGE)}<set attributeName="opacity" to="0" begin="${left}s"/></g>` : ''
+  const red = `<g opacity="${left > 0 ? 0 : 1}">${WALK_RED}${SWEAT}${left > 0 ? `<set attributeName="opacity" to="1" begin="${left}s"/>` : ''}</g>`
+  const orange = left > 0 ? `<g>${WALK_ORANGE}<set attributeName="opacity" to="0" begin="${left}s"/></g>` : ''
   // a hop half way
   const hopAt = (0.5 * e - elapsed) / 1000
   const hop = hopAt > 0 ? `<animateTransform attributeName="transform" type="translate" values="0 0;0 -${SPRITE_Y};0 0" dur="0.5s" begin="${hopAt}s"/>` : ''
   const w0 = `${Math.max(1, s0 * 100)}%`
-  const fill = rect(0, BAR_Y, left > 0 ? w0 : '100%', BAR_H, left <= 0 ? FILL_HEX.over : elapsed >= 0.85 * e ? FILL_HEX.near : FILL_HEX.run, ' rx="4"',
+  const fill = rect(0, BAR_Y, left > 0 ? w0 : '100%', BAR_H, left <= 0 ? FILL_HEX.over : elapsed >= NEAR * e ? FILL_HEX.near : FILL_HEX.run, ' rx="4"',
     (left > 0 ? `<animate attributeName="width" from="${w0}" to="100%" dur="${left}s" fill="freeze"/>` : '') +
     (near > 0 ? `<set attributeName="fill" to="${FILL_HEX.near}" begin="${near}s"/>` : '') +
     (left > 0 ? `<set attributeName="fill" to="${FILL_HEX.over}" begin="${left}s"/>` : ''))
-  // the words, one text a step (a second while the times are in seconds, then a minute; the first until the next whole step of the
-  // job), each shown from its start to the next one's
+  // the words, one text a step (a second while the times are in seconds, then a minute, or a few in a job of many hours; the first
+  // until the next whole step of the job), each shown from its start to the next one's
+  const slow = 60 * Math.max(1, Math.ceil(e / 60e3 / SLOW_WORDS))
   const steps: Array<{ at: number; said: string; colour: string }> = []
   let at = 0  // seconds from the drawing
   for (let i = 0; i < MAX_WORDS; i++) {
@@ -231,12 +258,12 @@ export const clawdSvg = (job: Job, t0: number): string => {
     const over = ms - e
     steps.push({
       at,
-      colour: over >= 0 ? FILL_HEX.over : ms >= 0.85 * e ? FILL_HEX.near : FILL_HEX.run,
+      colour: over >= 0 ? FILL_HEX.over : ms >= NEAR * e ? FILL_HEX.near : FILL_HEX.run,
       said: over >= 0 ? `${clockOf(ms)} - ${clockOf(over)} over the usual ${clockOf(e)}`
         : `${pct(ms / e)} - ${clockOf(ms)} - ETA ${clockOf(e - ms, true)} - ends ${hhmm(job.startedAt + e)}`,
     })
     // (seconds only in a job's first minute and in short jobs: a second a text all through a long one would outgrow the picture)
-    const step = ms < 60e3 || e < 180e3 ? 1 : 60
+    const step = ms < 60e3 || e < 180e3 ? 1 : slow
     const next = at + step - (ms / 1000) % step
     const end = (e - elapsed) / 1000  // the usual end gets a text of its own: "over" starts there, not at the next step
     at = at < end && next > end ? end : next
@@ -250,7 +277,7 @@ export const clawdSvg = (job: Job, t0: number): string => {
     const hide = i < steps.length - 1 ? `<set attributeName="visibility" to="hidden" begin="${r(steps[i + 1].at)}s"/>` : ''
     return `<text x="0" y="${CLAWD_H - 6}" fill="${st.colour}"${i === 0 ? '' : ' visibility="hidden"'}>${st.said}${show}${hide}</text>`
   })
-  return open + placed(s0, `<g>${hop}${dust()}${orange}${red}</g>`, 1, left) + track + fill +
+  return open + placed(s0, `<g>${hop}${DUST}${orange}${red}</g>`, 1, left) + track + fill +
     `<g font-size="14" font-weight="600" font-family="system-ui, sans-serif">${words.join('')}</g></svg>`
 }
 
@@ -260,35 +287,48 @@ export const clawdSvg = (job: Job, t0: number): string => {
 // stay the same, whenever the band is drawn again (a typed prompt, another job), since each new source reloads the frame, a blink.
 const REFRESH_MS = 60e3
 const pictures = new Map<string, { sig: string; at: number; svg: string }>()
-export const pictureOf = (job: Job, t: number): string => {
+const pictureOf = (job: Job, t: number): string => {
   const sig = `${job.expectedMs}|${job.doneAt}`
   const kept = pictures.get(job.id)
   if (kept !== undefined && kept.sig === sig && t - kept.at < REFRESH_MS) return kept.svg
   const svg = clawdSvg(job, t)
   pictures.set(job.id, { sig, at: t, svg })
-  if (pictures.size > 50) pictures.delete(pictures.keys().next().value as string)
   return svg
 }
 
 // The terminal's Clawd: one row of blocks, his legs swapping each second.
 const CLAWD_TEXT = ['▐▛█▜▌', '▝▜█▛▘']
+const CLAWD_CELLS = 5
 
 // The functions `$` is handed to are top-level declarations (the engine follows `$` only into those).
 let tick: { cancel: () => void } | null = null
 let serial = 0  // ids for tool calls that came without one
+let shownSig = ''  // the jobs shown at the last tick: a change draws the band again
 const rechecked = new Set<string>()  // module state: empty again after each reload
+const learning = new Map<string, Promise<void>>()  // one learn at a time a key, so two runs ending together both count
+// Background jobs a turn's end found gone before their notification came: what the notification needs to learn from them.
+const ended = new Map<string, { key: string; ms: number }>()
 
 // Learned durations live under STORE, keyed by keyOf; a change to what keyOf makes of a command takes a new prefix.
-const STORE = 'd4:'
+const STORE = 'd5:'
 
 async function expected($: EngineInterface, key: string): Promise<number | null> {
   const v = await $.store.get(`${STORE}${key}`)
   return typeof v === 'number' ? v : null
 }
 
-async function learn($: EngineInterface, key: string, ms: number): Promise<void> {
+async function learnNow($: EngineInterface, key: string, ms: number): Promise<void> {
   const old = await expected($, key)
+  if (old === null && ms < SHOW_AFTER_MS) return  // a quick command of a new kind is not worth a key
   await $.store.set(`${STORE}${key}`, old === null ? ms : Math.round(0.6 * old + 0.4 * ms))  // the typical duration, recent runs weighed more
+}
+
+function learn($: EngineInterface, key: string, ms: number): Promise<void> {
+  const run = (learning.get(key) ?? Promise.resolve()).then(() => learnNow($, key, ms))
+  const settled = run.catch(() => undefined)
+  learning.set(key, settled)
+  void settled.then(() => { if (learning.get(key) === settled) learning.delete(key) })
+  return run
 }
 
 // The frame's colour: red once a job is past its usual time, yellow once one is near it, cyan while none has an estimate, else green.
@@ -312,11 +352,21 @@ async function onTick($: EngineInterface): Promise<void> {
     }
   }
   const list = await read($, jobs)
-  const colour = urgencyOf(list, t)
+  for (const id of rechecked) if (!list.some(j => j.id === id)) rechecked.delete(id)
+  const shown = list.filter(j => isShown(j, t))
+  const colour = urgencyOf(shown, t)
   if (colour !== (await read($, urgency))) await update($, urgency, () => colour)
+  // the desktop draws only on a change: a job past SHOW_AFTER_MS is one
+  const sig = shown.map(j => j.id).join(',')
+  if (sig !== shownSig) {
+    shownSig = sig
+    await update($, redraw, n => n + 1)
+  }
   if (list.length === 0 && tick !== null) {
     tick.cancel()
     tick = null
+    // a job started while this tick ran found the old timer still set: it gets a new one
+    if ((await read($, jobs)).length > 0) ensureTick($)
   }
 }
 
@@ -345,16 +395,53 @@ async function finish($: EngineInterface, id: string, succeeded: boolean): Promi
   await learn($, job.key, t - job.startedAt)
 }
 
-// What a background call answers with: `… running in background with ID: <id>`.
+// What a background call answers with: a shell's `… running in background with ID: <id>`, an agent's `agentId: <id>`.
 export const backgroundIdOf = (ran: ToolCallResult): string | null => {
   const said = typeof ran.text === 'string' ? ran.text : JSON.stringify(ran.result ?? '')
-  return /background with ID: ([\w-]+)/.exec(said)?.[1] ?? null
+  return /(?:background with ID|agentId)[:=]?\s*"?([\w-]+)/.exec(said)?.[1] ?? null
 }
 
-// A background task's end, as its notification row says it: its id and how it ended.
-export const taskEndOf = (message: unknown): { id: string; succeeded: boolean } | null => {
-  const ended = /<task-id>([\w-]+)<\/task-id>[\s\S]*?<status>(completed|failed|killed|stopped)<\/status>/.exec(JSON.stringify(message))
-  return ended === null ? null : { id: ended[1], succeeded: ended[2] === 'completed' }
+// The background tasks a notification row says ended: each one's id, the call that started it when it says, and whether it succeeded.
+// A row may carry several notifications; each is read on its own.
+export type TaskEnd = { id: string; callId?: string; succeeded: boolean }
+export const taskEndsOf = (said: string): TaskEnd[] =>
+  (said.match(/<task-notification>[\s\S]*?<\/task-notification>/g) ?? [said]).flatMap(block => {
+    const id = /<task-id>([\w-]+)<\/task-id>/.exec(block)?.[1]
+    const status = /<status>(completed|failed|killed|stopped)<\/status>/.exec(block)?.[1]
+    const callId = /<tool-use-id>([\w-]+)<\/tool-use-id>/.exec(block)?.[1]
+    return id !== undefined && status !== undefined ? [{ id, callId, succeeded: status === 'completed' }] : []
+  })
+
+async function finishTask($: EngineInterface, end: TaskEnd): Promise<void> {
+  const names = (id: string) => id === end.id || (end.callId !== undefined && id === end.callId)
+  const job = (await read($, jobs)).find(j => names(j.id) || (j.callId !== undefined && names(j.callId)))
+  if (job !== undefined) return finish($, job.id, end.succeeded)
+  // found gone at a turn's end before its notification: learned from then
+  const gone = ended.get(end.id) ?? (end.callId !== undefined ? ended.get(end.callId) : undefined)
+  if (gone === undefined) return
+  ended.delete(end.id)
+  if (end.callId !== undefined) ended.delete(end.callId)
+  if (end.succeeded) await learn($, gone.key, gone.ms)
+}
+
+// At a turn's end the engine lists the background work still in flight: a background job not on it ended without a notification
+// this mod read (a missed or reworded one, a task stopped), and goes. Its id is checked against the list only once another job's id
+// is on it, or the list is empty, so a list naming tasks some other way never drops a job that still runs.
+async function reconcile($: EngineInterface, tasks: ReadonlyArray<{ id: string }>): Promise<void> {
+  const t = await $.clock.now()
+  const live = new Set(tasks.map(k => k.id))
+  const list = await read($, jobs)
+  const background = list.filter(j => j.kind === 'background' && j.doneAt === undefined && t - j.startedAt > 5000)
+  const idsMatch = background.some(j => live.has(j.id))
+  const gone = background.filter(j => !live.has(j.id) && (live.size === 0 || (idsMatch && j.id !== j.callId)))
+  if (gone.length === 0) return
+  for (const j of gone) {
+    const was = { key: j.key, ms: t - j.startedAt }
+    ended.set(j.id, was)
+    if (j.callId !== undefined) ended.set(j.callId, was)
+  }
+  while (ended.size > 50) ended.delete(ended.keys().next().value as string)
+  await update($, jobs, all => all.filter(j => !gone.some(g => g.id === j.id)))
 }
 
 // A client came or went: the desktop loads the band's frames again when it shows the session again, so the pictures are made anew.
@@ -388,34 +475,42 @@ export const register: Register = on => {
     if (QUICK.has(tool) || tool.startsWith('mcp__')) return next(e)
     const args = e as unknown as Record<string, unknown>
     const startedAt = await $.clock.now()
-    const id = e.tool_use_id ?? `${tool}-${startedAt}-${++serial}`
+    const callId = e.tool_use_id ?? `${tool}-${startedAt}-${++serial}`
     const key = keyOf(tool, args)
     const label = labelOf(tool, args)
-    const job = (jobId: string, kind: Job['kind']): Promise<Job> =>
-      expected($, key).then(expectedMs => ({ id: jobId, kind, label, key, startedAt, expectedMs }))
-    await start($, await job(id, tool === 'Agent' ? 'agent' : 'tool'))
+    const expectedMs = await expected($, key)
+    await start($, { id: callId, kind: tool === 'Agent' ? 'agent' : 'tool', label, key, startedAt, expectedMs })
     try {
       const ran = await next(e)
       const failed = ran.deny !== undefined || ran.isError === true
       if (args.run_in_background === true && !failed) {
-        // the call returned at once: the work goes on as a background task until its notification
-        await update($, jobs, list => list.filter(j => j.id !== id))
-        const bg = backgroundIdOf(ran)
-        if (bg !== null) await start($, await job(bg, 'background'))
+        // the call returned at once: the work goes on as a background task until its notification, or a turn's end finds it gone
+        await finish($, callId, false)
+        await start($, { id: backgroundIdOf(ran) ?? callId, callId, kind: 'background', label, key, startedAt, expectedMs })
       } else {
-        await finish($, id, !failed)
+        await finish($, callId, !failed)
       }
       return ran
     } catch (err) {
-      await finish($, id, false)
+      await finish($, callId, false)
       throw err
     }
   })
 
+  // A background task's end: the notification row names it. Only notification rows are read, never a tool's output or a reply that
+  // quotes one.
   on('session.append', async ($, e, next) => {
-    const ended = taskEndOf(e.message)
-    if (ended !== null) await finish($, ended.id, ended.succeeded)
+    if ((e.origin as { kind?: string }).kind === 'task-notification' || e.message.type === 'attachment') {
+      const said = JSON.stringify(e.message.content)
+      if (said.includes('<task-id>')) for (const end of taskEndsOf(said)) await finishTask($, end)
+    }
     return next(e)
+  })
+
+  on('classic.Stop', async ($, e, next) => {
+    const r = await next(e)
+    if (Array.isArray(e.background_tasks)) await reconcile($, e.background_tasks)
+    return r
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -427,7 +522,10 @@ export const register: Register = on => {
     const isPicture = e.surface !== 'terminal' && Svg !== undefined
     // the terminal redraws each second by `now`; the desktop's picture animates itself, so it reads the clock without subscribing
     const t = isPicture ? await $.clock.now() : await read($, now)
-    const shown = [...list].sort((a, b) => a.startedAt - b.startedAt).slice(-SHOWN)
+    const visible = list.filter(j => isShown(j, t))
+    if (visible.length === 0) return next(e)
+    if (isPicture) for (const id of pictures.keys()) if (!list.some(j => j.id === id)) pictures.delete(id)
+    const shown = [...visible].sort((a, b) => a.startedAt - b.startedAt).slice(-SHOWN)
     return (
       <Box flexDirection="column" borderStyle="round" borderColor={await read($, urgency)} paddingX={1}>
         {shown.map(job => {
@@ -440,20 +538,23 @@ export const register: Register = on => {
               </Box>
             )
           }
-          const clawd = p.mood === 'done' || p.mood === 'sleep' ? CLAWD_TEXT[0] : CLAWD_TEXT[Math.floor(t / 1000) % 2]
+          const isAsleep = p.mood === 'sleep'
+          const clawd = p.mood === 'done' || isAsleep ? CLAWD_TEXT[0] : CLAWD_TEXT[Math.floor(t / 1000) % 2]
+          // the cells before Clawd: he stands over the end of the filled part, and always inside the bar's width
+          const lead = Math.round(Math.min(p.share, 1) * (BAR_CELLS - CLAWD_CELLS - (isAsleep ? 2 : 0)))
+          const sweepLead = Math.round(p.share * (BAR_CELLS - 2))
           return (
             <Box key={job.id} flexDirection="column">
-              {/* the bar is laid out in cells, not drawn in characters: a constant length whatever the font, and Clawd stands
-                  exactly over the end of the filled part */}
+              {/* the bar is laid out in cells, not drawn in characters: a constant length whatever the font */}
               <Box width={BAR_CELLS}>
-                <Box width={`${Math.round(Math.min(p.share, 0.94) * 100)}%`}><Text> </Text></Box>
-                <Text bold color={p.mood === 'over' ? RED : ORANGE}>{clawd}{p.mood === 'sleep' ? ' z' : ''}</Text>
+                {lead > 0 ? <Box width={lead}><Text> </Text></Box> : null}
+                <Text bold color={p.mood === 'over' ? RED : ORANGE}>{clawd}{isAsleep ? ' z' : ''}</Text>
               </Box>
               <Box>
                 <Box width={BAR_CELLS} backgroundColor="#3a3a38">
-                  {p.mood === 'sleep'
+                  {isAsleep
                     ? <Box width={BAR_CELLS}>
-                        <Box width={`${Math.round(p.share * 100)}%`}><Text> </Text></Box>
+                        {sweepLead > 0 ? <Box width={sweepLead}><Text> </Text></Box> : null}
                         <Box width={2} backgroundColor={MOOD_COLOUR.sleep}><Text> </Text></Box>
                       </Box>
                     : <Box width={`${Math.max(1, Math.round(p.share * 100))}%`} backgroundColor={MOOD_COLOUR[p.mood]}><Text> </Text></Box>}
@@ -466,7 +567,7 @@ export const register: Register = on => {
           )
         })}
         <Box justifyContent="space-between">
-          <Text dimColor>{list.length > SHOWN ? `+${list.length - SHOWN} more` : ' '}</Text>
+          <Text dimColor>{visible.length > SHOWN ? `+${visible.length - SHOWN} more` : ' '}</Text>
           <Button key="hide" label="Hide" onPress={() => update($, isHidden, () => true)} />
         </Box>
       </Box>
