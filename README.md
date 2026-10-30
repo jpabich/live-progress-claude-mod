@@ -49,6 +49,8 @@ claude plugin install live-progress@live-progress-claude-mod
 
 In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `jpabich/live-progress-claude-mod`, then **Add plugin**.
 
+The mod needs a Claude Code recent enough to load hooks modules (it was built on 2.1.314). An older one installs it without error but shows no band; run `claude update`, then restart the session.
+
 ## Develop
 
 ```bash
