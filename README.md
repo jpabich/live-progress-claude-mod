@@ -1,5 +1,7 @@
 # live-progress
 
+![live-progress demo](assets/demo.gif)
+
 A Claude Code mod: a band above the prompt showing what is running right now (long tool calls, background builds and tests, subagents), each with a progress bar that fills by the job's learned typical duration (ETA).
 
 - On the desktop app, Clawd walks along an animated SVG bar, sweats when a job runs past its usual time and jumps with confetti when it finishes.
