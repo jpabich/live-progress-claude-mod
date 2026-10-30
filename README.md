@@ -17,9 +17,9 @@ A Claude Code mod: a band above the prompt showing what is running right now (lo
 - Durations are learned per command kind (exponential average kept in the mod's store), so the second run of something gets an ETA. A kind is the script being run (by file name) or the program, with up to two subcommands (`manage.py migrate`, `npm run build`), plus the flags given, with their values when they name a mode or a place (`-Target web`, not `-OutName run7`). Each command of a chain counts, `cd`/`Set-Location` don't, and wrappers (`timeout`, `time`, `sudo`, `env`, `npx`, …) count by what they run: `./build.ps1 -Quick` and `./build.ps1 -Target web` learn apart, as do `npm ci` and `npm ci && npm run build`. Subagents learn by their type.
 - Only runs that succeed teach a duration: a failed, refused or killed run is dropped from the band without changing the ETA, and a run that waited on a permission dialog teaches nothing (your time on the dialog is not the run's).
 - Quick commands don't open the band: a job shows once it has run 2 s, or at once when its kind usually takes longer.
-- Background tasks (`run_in_background`, or a command you move to the background with Ctrl+B) end on their notification, read as it is delivered to the model. A background subagent ends with its own turn, unless it is waiting on background work of its own; a task Claude stops (`TaskStop`) goes at once. When several of these tell of one end, it counts once.
-- A call still on the band when its own loop's turn ends (the main conversation's or a subagent's) lost its end and is dropped. A background command that ends with no notification the mod can read is dropped far past its usual time, teaching nothing: past 3× its usual time and at least 10 min, or past 4 h on a first run. A background subagent past that time stays while Claude Code still lists it as running: a local one ends with its own turn, which always comes, and the mod knows it by the id its start gave; a remote one has no local turn, and goes by time once it is no longer listed.
-- The mod hooks neither `session.append` nor `classic.Stop`: a managed plugin an administrator installs may pass those events on past user plugins, and Claude Code then says in the transcript that the plugin's hook was skipped.
+- Background tasks (`run_in_background`, or a command you move to the background with Ctrl+B) end on their notification, read both as the session stores it and as it is delivered to the model (also into a running turn). A background subagent ends with its own turn, unless it is waiting on background work of its own; a task Claude stops (`TaskStop`) goes at once. When several of these tell of one end, it counts once.
+- A call still on the band when its own loop's turn ends (the main conversation's or a subagent's) lost its end and is dropped. At each turn's end, a task Claude Code no longer lists as in flight is dropped 10 s later without teaching a duration (its notification, if it comes meanwhile, still teaches), once the list is empty or names another of the band's tasks (so a list that names tasks some other way never drops one still running); a background subagent Claude Code still lists as running stays. A background command the last turn's end named stays; one it did not name, or any where no turn's end lists the work in flight (the `taskHooks` option off, or a managed plugin taking it past the mod), is dropped far past its usual time when it ends with no notification the mod can read, teaching nothing: past 3× its usual time and at least 10 min, or past 4 h on a first run. A background subagent past that time stays while Claude Code still lists it as running: a local one ends with its own turn, which always comes, and the mod knows it by the id its start gave; a remote one has no local turn, and goes by time once it is no longer listed.
+- The `session.append` and `classic.Stop` hooks (the `taskHooks` option, on by default) can be turned off: a managed plugin an administrator installs may pass those events on past user plugins, and Claude Code then says in the transcript that the plugin's hook was skipped (`live-progress … hook was skipped` lines). Off, background commands end on notifications delivered between turns, a `TaskStop`, or far past their usual time.
 - Everything is drawn locally from engine events and a local clock: no model calls, no tokens.
 - **Hide** closes the band until your next prompt (a turn started by a background notification or a schedule leaves it hidden).
 
@@ -58,8 +58,9 @@ The mod needs a Claude Code recent enough to load hooks modules (it was built on
 | Option | Default | What it does |
 | --- | --- | --- |
 | `clawd` (Clawd in the terminal) | on | Off: the CLI band draws each job as its progress bar and label alone, two rows a job, so it takes less room and more jobs fit. The desktop app always draws Clawd. |
+| `taskHooks` (Quick end of background tasks) | on | Hooks `session.append` and `classic.Stop`, so a background task leaves the band as soon as it ends, also when its notification comes during a turn or never comes. Turn it off where Claude Code shows `live-progress … hook was skipped` lines. |
 
-Set it in `/config` in a terminal session (the row **Clawd in the terminal** under live-progress), or on the options screen `/plugin install` shows.
+Set them in `/config` in a terminal session (the rows **Clawd in the terminal** and **Quick end of background tasks** under live-progress), or on the options screen `/plugin install` shows.
 
 ## Develop
 
@@ -84,7 +85,7 @@ claude plugin test .
 | `.claude-plugin/plugin.json` | the mod's manifest |
 | `.claude-plugin/marketplace.json` | makes this repository an installable marketplace |
 | `hooks/hooks.json` | names the hooks module |
-| `hooks/register.tsx` | the hooks: `tool.call`, `agent.spawn`, `classic.PermissionRequest`, `turn.complete`, `ui.render` (AbovePrompt), `prompt.submit`, `session.start`, `session.attach`, `session.detach` |
+| `hooks/register.tsx` | the hooks: `tool.call`, `agent.spawn`, `classic.PermissionRequest`, `session.append` and `classic.Stop` (the `taskHooks` option), `turn.complete`, `ui.render` (AbovePrompt), `prompt.submit`, `session.start`, `session.attach`, `session.detach` |
 | `hooks/register.test.tsx` | the tests (`claude plugin test .`) |
 | `types/index.d.ts` | the `$.state` contract (`jobs`, `now`, `isHidden`, `urgency`, `redraw`) |
 | `assets/` | the demo GIFs |

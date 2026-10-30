@@ -1,6 +1,6 @@
 {
   "name": "live-progress",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "A band above the prompt: what runs now (tool calls, background builds and tests, subagents) with a progress bar by learned ETA, redrawn locally, no model tokens.",
   "author": { "name": "Jerzy Pabich" },
   "types": "./types/index.d.ts",
@@ -10,6 +10,12 @@
       "type": "boolean",
       "title": "Clawd in the terminal",
       "description": "Draw Clawd walking above each progress bar in the CLI. Off: only the bar and the job's label, two rows a job, so more jobs fit. The desktop app always draws him.",
+      "default": true
+    },
+    "taskHooks": {
+      "type": "boolean",
+      "title": "Quick end of background tasks",
+      "description": "Also hook session.append and classic.Stop, so a background task leaves the band as soon as it ends, also when its notification comes during a turn. Turn off where a managed plugin makes Claude Code show 'live-progress … hook was skipped' lines: background tasks then end on notifications between turns, or far past their usual time.",
       "default": true
     }
   }

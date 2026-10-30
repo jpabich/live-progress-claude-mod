@@ -112,6 +112,7 @@ const labelOf = (tool: string, e: Record<string, unknown>): string => {
 
 const DONE_SHOW_MS = 3000
 const LOST_AFTER_MS = 5000  // a call older than this at its loop's turn end lost its end
+const UNLISTED_GRACE_MS = 10_000  // a background job a turn's end no longer lists goes this long after, so a notification delivered then teaches
 const STUCK_AFTER = 3  // times a background job's usual time, at least MIN_STUCK_MS
 const MIN_STUCK_MS = 10 * 60_000
 const UNKNOWN_STUCK_MS = 4 * 60 * 60_000  // a first run's: long, as no list of the work in flight says what still runs
@@ -430,6 +431,15 @@ const learning = new Map<string, Promise<void>>()  // one learn at a time a key,
 const asked = new Set<string>()  // jobs a permission dialog was put up for: the person's wait is no part of the run, which teaches nothing
 const ending = new Set<string>()  // jobs an event is ending: another telling of the same end (they may overlap) finds it taken
 const spawned = new Map<string, string>()  // an Agent call still running → the id of the subagent it started (`agent.spawn`)
+// The `taskHooks` option: on, the mod also hooks `session.append` (a notification delivered into a running turn) and `classic.Stop`
+// (each turn's end lists the work in flight). A plugin of a managed tier may take those past this one (`next.to`), and the engine
+// then says in the transcript that the mod's hook was skipped; off, they are not hooked. A background job the last list named stays
+// past the time bound; one it did not, or every one while no list was heard, goes by it. With the option on, the bound waits for a
+// list or two main-loop answered turns without one (an interrupted or failed turn raises no Stop, so it does not count).
+let hooksTasks = true
+let listed: Set<string> | null = null  // the ids the last `classic.Stop` listed in flight; null until one is heard
+let answeredTurns = 0
+const unlisted = new Map<string, number>()  // a background job a turn's end no longer lists → when: it goes UNLISTED_GRACE_MS later
 
 // Learned durations live under STORE, keyed by keyOf, each `{ ms, at }`: the typical duration and when it was last taught. A change
 // to what keyOf makes of a command takes a new prefix; session.start clears the old ones and, past MAX_KEYS, the least lately taught.
@@ -489,9 +499,16 @@ async function onTick($: EngineInterface): Promise<void> {
   await update($, now, () => t)
   const stale = (j: Job) => j.doneAt !== undefined && t - j.doneAt >= DONE_SHOW_MS
   if ((await read($, jobs)).some(stale)) await update($, jobs, all => all.filter(j => !stale(j)))  // (a write each tick redrew the band each tick)
-  // a background job long past its usual time ended unseen (no notification this mod could read), and goes
-  const stuck = (await read($, jobs)).filter(j => isStuck(j, t))
-  if (stuck.length > 0) await drop($, await unstuck($, stuck))
+  // a background job a turn's end no longer listed goes a moment later, unless its notification, delivered as the turn ends, came first
+  const late = (await read($, jobs)).filter(j => j.doneAt === undefined && t - (unlisted.get(j.id) ?? Infinity) >= UNLISTED_GRACE_MS)
+  if (late.length > 0) await drop($, late)
+  // a background job long past its usual time ended unseen (no notification this mod could read), and goes, unless the last turn's
+  // end listed it in flight
+  const known = hooksTasks ? listed : null
+  if (!hooksTasks || known !== null || answeredTurns >= 2) {
+    const stuck = (await read($, jobs)).filter(j => isStuck(j, t) && known?.has(j.id) !== true)
+    if (stuck.length > 0) await drop($, await notLive($, stuck))
+  }
   // a job begun before a (re)load has its estimate looked up again: a run may have taught it meanwhile (learnNow hands a new one to
   // the jobs of its kind still going)
   for (const j of await read($, jobs)) {
@@ -503,6 +520,7 @@ async function onTick($: EngineInterface): Promise<void> {
   }
   const list = await read($, jobs)
   for (const ids of [rechecked, asked, ending]) for (const id of ids) if (!list.some(j => j.id === id)) ids.delete(id)
+  for (const id of unlisted.keys()) if (!list.some(j => j.id === id)) unlisted.delete(id)
   const shown = list.filter(j => isShown(j, t))
   const colour = urgencyOf(shown, t)
   if (colour !== (await read($, urgency))) await update($, urgency, () => colour)
@@ -552,7 +570,7 @@ async function handOff($: EngineInterface, from: string, job: Job): Promise<void
 
 // A job's end: one that succeeded shows "done" a moment and teaches its duration, unless a permission dialog waited on the person;
 // one that failed, was refused or stopped just goes, so a crash after five seconds does not teach a two-hour build that it takes five
-// seconds. Several events may tell of one end (the prompt a notification is delivered as, a subagent's turn end, a TaskStop), even at once:
+// seconds. Several events may tell of one end (the stored row, the prompt it is delivered as, a subagent's turn end, a TaskStop), even at once:
 // the first takes it before it awaits anything, and the rest, or one after a reload, find it taken or done and teach nothing again.
 async function finish($: EngineInterface, id: string, succeeded: boolean): Promise<void> {
   if (ending.has(id)) return
@@ -621,21 +639,40 @@ const isLost = (j: Job, t: number, agentId: string | undefined): boolean =>
   j.kind === 'tool' && j.agentId === agentId && j.doneAt === undefined && t - j.startedAt > LOST_AFTER_MS
 
 // A background job far past its usual time, or UNKNOWN_STUCK_MS on a first run: it ended without a notification this mod read (a
-// missed or reworded one), and goes, teaching nothing (when it ended is not known). The mod hooks no event that lists the work still
-// in flight (`classic.Stop` does, but a managed plugin may take it past this one, and the engine then says the hook was skipped),
-// so time is the only sign left. A subagent past it goes only once the engine no longer lists it as live (unstuck): a local one ends
+// missed or reworded one), and goes, teaching nothing (when it ended is not known). Where `classic.Stop` lists the work in flight, a
+// job it names stays; time is the sign left for one it does not (an id read another way), and for all where no list is heard (the
+// `taskHooks` option off, or a managed plugin taking it past this one). A subagent past it goes only once the engine no longer lists
+// it as live (notLive): a local one ends
 // by its own turn's end, which always comes, and a remote one, with no local loop and so no turn end, is listed while it runs or not
 // at all.
 export const isStuck = (j: Job, t: number): boolean =>
   j.kind === 'background' && j.doneAt === undefined &&
   t - j.startedAt > (j.expectedMs === null ? UNKNOWN_STUCK_MS : Math.max(STUCK_AFTER * j.expectedMs, MIN_STUCK_MS))
 
+// The jobs of these that may go: all but the subagents the engine still lists as live.
 const LIVE = new Set(['pending', 'running', 'waiting'])
-async function unstuck($: EngineInterface, stuck: Job[]): Promise<Job[]> {
+async function notLive($: EngineInterface, gone: Job[]): Promise<Job[]> {
   const isAgent = (j: Job) => j.key.startsWith('Agent:')
-  if (!stuck.some(isAgent)) return stuck
+  if (!gone.some(isAgent)) return gone
   const live = new Set((await $.agent.list().catch(() => [])).filter(a => LIVE.has(a.status)).map(a => a.id))
-  return stuck.filter(j => !(isAgent(j) && live.has(j.id)))
+  return gone.filter(j => !(isAgent(j) && live.has(j.id)))
+}
+
+// At a turn's end the engine lists the background work still in flight (`classic.Stop`): a background job not on it ended without a
+// notification this mod read yet (a missed or reworded one, a task stopped), and goes UNLISTED_GRACE_MS later, teaching nothing (when
+// it ended is not known), unless its notification, delivered as the turn ends, comes first and teaches. Its id is checked against the
+// list only once another job's id is on it, or the list is empty, so a list naming tasks some other way never drops a job that still
+// runs; a subagent the engine lists as live stays (it ends by its own turn). The main loop's calls that lost their end go by
+// turn.complete.
+async function reconcile($: EngineInterface, tasks: ReadonlyArray<{ id: string }>): Promise<void> {
+  const t = await $.clock.now()
+  const live = new Set(tasks.map(k => k.id))
+  listed = live
+  const running = (await read($, jobs)).filter(j => j.kind === 'background' && j.doneAt === undefined && t - j.startedAt > LOST_AFTER_MS)
+  const idsMatch = running.some(j => live.has(j.id))
+  for (const j of running) if (live.has(j.id)) unlisted.delete(j.id)
+  const gone = await notLive($, running.filter(j => !live.has(j.id) && (live.size === 0 || (idsMatch && j.id !== j.callId))))
+  for (const j of gone) if (!unlisted.has(j.id)) unlisted.set(j.id, t)
 }
 
 // A loop's turn ended: the main loop's or a subagent's calls still here lost their end and go.
@@ -664,6 +701,10 @@ const TYPED = new Set(['composer', 'bridge', 'sdk', 'slack-ping'])  // a prompt 
 
 export const register: Register = (on, options) => {
   const wantsClawd = options.clawd !== false  // the `clawd` option: off, the terminal draws each job as its bar and label alone
+  // the `taskHooks` option, and what its hooks heard: a registration with the option changed starts afresh
+  hooksTasks = options.taskHooks !== false
+  listed = null
+  answeredTurns = 0
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
@@ -743,15 +784,47 @@ export const register: Register = (on, options) => {
     return r
   }).catch(($, e, next) => next(e))
 
+  if (hooksTasks) {
+    // A background task's end: the notification row names it, as a row of its own or delivered into a running turn (a queued
+    // command's attachment, which reaches no `prompt.submit`). Only those rows are read, never a tool's output, a file or a reply that
+    // quotes one.
+    // (a failure after `next` is the mod's alone, as in turn.complete: the row stays stored once, and nothing beneath runs again)
+    on('session.append', async ($, e, next) => {
+      const r = await next(e)
+      try {
+        const isNotice = (e.origin as { kind?: string } | undefined)?.kind === 'task-notification' ||
+          (e.message.type === 'attachment' && e.message.name === 'queued_command')
+        if (isNotice) {
+          const said = JSON.stringify(e.message.content)
+          if (said.includes('<task-id>')) for (const end of taskEndsOf(said)) await finishTask($, end)
+        }
+      } catch {
+        // the job's notification as a prompt, the turn's end or the time bound ends it
+      }
+      return r
+    }).catch(($, e, next) => next(e))
+
+    on('classic.Stop', async ($, e, next) => {
+      const r = await next(e)
+      try {
+        if (Array.isArray(e.background_tasks)) await reconcile($, e.background_tasks)
+      } catch {
+        // the next turn's end or the time bound ends the job
+      }
+      return r
+    }).catch(($, e, next) => next(e))
+  }
+
   // A turn's end. A background subagent's ends its job (its notification reaches no `prompt.submit` as one: the subagent's report
   // comes as its own message), unless it waits on background work of its own and so runs on; any loop's end drops its calls that
-  // lost their end. The mod hooks neither `session.append` nor `classic.Stop`: a managed plugin may take those past it, and the engine
-  // then says in the transcript that the mod's hook was skipped. A failure after `next` is the mod's alone: the turn's result stands, and nothing
-  // beneath runs again (as the `.catch` would make it).
+  // lost their end. A failure after `next` is the mod's alone: the turn's result stands, and nothing beneath runs again (as the
+  // `.catch` would make it).
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     try {
-      if (e.agentId !== undefined && (await read($, jobs)).some(j => j.kind === 'background' && j.id === e.agentId) &&
+      if (e.agentId === undefined) {
+        if (e.reason === 'answer') answeredTurns++
+      } else if ((await read($, jobs)).some(j => j.kind === 'background' && j.id === e.agentId) &&
         (await $.agent.list().catch(() => [])).find(a => a.id === e.agentId)?.status !== 'waiting') {
         await finishTask($, { id: e.agentId, succeeded: e.reason === 'answer' })
       }
