@@ -1,3 +1,4 @@
+import type { AgentStatus } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Job } from '../types'
@@ -557,6 +558,124 @@ describe('what a run teaches and when a job goes', () => {
     await clock.advance(4_000)
     expect(await shows($, /Look round/)).toBe(false)
     expect(await shows($, /quiet\.sh/)).toBe(false)
+  })
+
+  // where a managed plugin takes session.append and classic.Stop past the mod, the ends still come through other events
+  describe('without session.append or classic.Stop', () => {
+    const launch = (on: Parameters<Body>[1], learned: Record<string, { ms: number; at: number }> = {}) => {
+      const clock = mock.clock(on, { now: 1_000_000 })
+      mock.store(on, learned)
+      engineBand(on)
+      const agent = { id: 'a7f-3', description: 'Look round', type: 'Explore', status: 'running' as AgentStatus }
+      on('agent.list', () => ({ value: [agent] }))
+      on('prompt.submit', (_, e) => ({ text: e.text }))
+      on('turn.complete', (_, e) => ({ text: e.answer }))
+      on('tool.call', async (_, e) => {
+        if (e.tool === 'Agent') return { result: {}, text: 'Async agent launched. agentId: a7f-3' }
+        if ((e as { run_in_background?: boolean }).run_in_background === true) return { result: {}, text: 'Command running in background with ID: bg-1' }
+        await clock.sleep(60_000)
+        return { result: {}, text: 'ok' }
+      })
+      return { clock, agent }
+    }
+    // as a session delivers one (its summary and output file included)
+    const ends = [
+      '<task-notification>',
+      '<task-id>bg-1</task-id>',
+      '<tool-use-id>toolu_018SZj3N7yD6o5qNrXVFd98w</tool-use-id>',
+      '<output-file>C:\\tasks\\bg-1.output</output-file>',
+      '<status>completed</status>',
+      '<summary>Background command "quiet" completed (exit code 0)</summary>',
+      '</task-notification>',
+    ].join('\n')
+    const turnEnd = { answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' as const }
+    // what a kind of job was taught, as the next run of it shows: the time left at its start
+    const nextRunShows = async ($: Engine, clock: ReturnType<typeof launch>['clock'], call: Parameters<Engine['tool']['call']>[0], label: RegExp) => {
+      const run = $.tool.call(call)
+      await clock.settle()
+      const found = await shows($, label)
+      await clock.advance(60_000)
+      await run
+      return found
+    }
+
+    test('a notification delivered as a prompt ends the task; a typed one quoting it does not', async ($, on) => {
+      const { clock } = launch(on)
+      await $.tool.call({ tool: 'Bash', command: './quiet.sh', run_in_background: true })
+      await clock.advance(3_000)
+      await $.prompt.submit({ text: ends, asUser: true })
+      expect(await shows($, /quiet\.sh/)).toBe(true)
+      await $.prompt.submit({ text: ends, origin: { kind: 'task-notification' } })
+      await clock.advance(4_000)
+      expect(await shows($, /quiet\.sh/)).toBe(false)
+    })
+
+    test('an end told by two events at once teaches once', async ($, on) => {
+      const { clock } = launch(on, { 'd7:Bash:quiet.sh': { ms: 60_000, at: 0 } })
+      await $.tool.call({ tool: 'Bash', command: './quiet.sh', run_in_background: true })
+      await clock.advance(4_000)
+      await Promise.all([$.session.append(notification(['bg-1', 'completed'])), $.prompt.submit({ text: ends, origin: { kind: 'task-notification' } })])
+      await clock.advance(4_000)
+      expect(await nextRunShows($, clock, { tool: 'Bash', command: './quiet.sh' }, /ETA 38s/)).toBe(true)  // 0.6 × 60s + 0.4 × 4s, once
+    })
+
+    test("a background subagent's turn end ends its job and teaches, unless it waits on work of its own", async ($, on) => {
+      const { clock, agent } = launch(on)
+      await $.tool.call({ tool: 'Agent', description: 'Look round', prompt: 'look', subagent_type: 'Explore', run_in_background: true })
+      const lost = $.tool.call({ tool: 'Bash', command: './sub.sh', agentId: 'a7f-3' })
+      await clock.advance(6_000)
+      agent.status = 'waiting'
+      await $.turn.complete({ ...turnEnd, agentId: 'a7f-3' })
+      expect(await shows($, /Look round/)).toBe(true)
+      expect(await shows($, /sub\.sh/)).toBe(false)  // its own call that lost its end goes all the same
+      await clock.advance(4_000)
+      agent.status = 'completed'
+      await $.turn.complete({ ...turnEnd, agentId: 'a7f-3' })
+      await clock.advance(4_000)
+      expect(await shows($, /Look round/)).toBe(false)
+      await clock.advance(60_000)
+      await lost
+      const again = { tool: 'Agent', description: 'Look round', prompt: 'look', subagent_type: 'Explore', run_in_background: true } as const
+      expect(await nextRunShows($, clock, again, /ETA 10s/)).toBe(true)
+    })
+
+    test("an interrupted subagent's turn end ends its job and teaches nothing", async ($, on) => {
+      const { clock } = launch(on)
+      await $.tool.call({ tool: 'Agent', description: 'Look round', prompt: 'look', subagent_type: 'Explore', run_in_background: true })
+      await clock.advance(6_000)
+      await $.turn.complete({ ...turnEnd, agentId: 'a7f-3', isAborted: true, reason: 'aborted' })
+      expect(await shows($, /Look round/)).toBe(false)
+      await clock.advance(4_000)
+      await $.tool.call({ tool: 'Agent', description: 'Look round', prompt: 'look', subagent_type: 'Explore', run_in_background: true })
+      await clock.advance(2_500)  // a kind not yet known shows once it has run a while
+      expect(await shows($, /no ETA yet/)).toBe(true)
+    })
+
+    test("the main loop's turn end drops a call that lost its end", async ($, on) => {
+      const { clock } = launch(on)
+      const lost = $.tool.call({ tool: 'Bash', command: './main.sh' })
+      await clock.advance(6_000)
+      expect(await shows($, /main\.sh/)).toBe(true)
+      await $.turn.complete(turnEnd)
+      expect(await shows($, /main\.sh/)).toBe(false)
+      await clock.advance(60_000)
+      await lost
+    })
+
+    for (const isStopHeard of [false, true]) {
+      test(`a background job far past its usual time ${isStopHeard ? 'stays where a turn end lists it in flight' : 'goes where no turn end lists the work in flight'}`, async ($, on) => {
+        const { clock } = launch(on, { 'd7:Bash:quiet.sh': { ms: 10_000, at: 0 } })
+        await $.tool.call({ tool: 'Bash', command: './quiet.sh', run_in_background: true })
+        for (let turn = 0; turn < 2; turn++) {
+          await $.turn.complete(turnEnd)
+          if (isStopHeard) await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'bg-1', type: 'shell', status: 'running', description: '' }] })
+        }
+        await clock.advance(9 * 60_000)
+        expect(await shows($, /quiet\.sh/)).toBe(true)  // the bound is 10 min, at least
+        await clock.advance(2 * 60_000)
+        expect(await shows($, /quiet\.sh/)).toBe(isStopHeard)
+      })
+    }
   })
 
   test('the terminal band shows as many jobs as fit its rows, the latest', async ($, on) => {

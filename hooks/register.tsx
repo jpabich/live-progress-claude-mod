@@ -111,6 +111,10 @@ const labelOf = (tool: string, e: Record<string, unknown>): string => {
 }
 
 const DONE_SHOW_MS = 3000
+const LOST_AFTER_MS = 5000  // a call older than this at its loop's turn end lost its end
+const STUCK_AFTER = 3  // times a background job's usual time, at least MIN_STUCK_MS
+const MIN_STUCK_MS = 10 * 60_000
+const UNKNOWN_STUCK_MS = 60 * 60_000
 
 export type Look = { words: string; mood: 'run' | 'near' | 'over' | 'sleep' | 'done'; share: number }
 
@@ -408,6 +412,11 @@ let shownSig = ''  // the jobs shown at the last tick: a change draws the band a
 const rechecked = new Set<string>()  // module state: empty again after each reload
 const learning = new Map<string, Promise<void>>()  // one learn at a time a key, so two runs ending together both count
 const asked = new Set<string>()  // jobs a permission dialog was put up for: the person's wait is no part of the run, which teaches nothing
+const ending = new Set<string>()  // jobs an event is ending: another telling of the same end (they may overlap) finds it taken
+// Whether `classic.Stop` reaches this mod: a plugin of a managed tier may take it past (`next.to`). Two main-loop turn ends without
+// it, and a background job past STUCK_AFTER its usual time (UNKNOWN_STUCK_MS with none) is taken to have ended unseen.
+let stopHeard = false
+let mainTurnsEnded = 0
 
 // Learned durations live under STORE, keyed by keyOf, each `{ ms, at }`: the typical duration and when it was last taught. A change
 // to what keyOf makes of a command takes a new prefix; session.start clears the old ones and, past MAX_KEYS, the least lately taught.
@@ -467,6 +476,8 @@ async function onTick($: EngineInterface): Promise<void> {
   await update($, now, () => t)
   const stale = (j: Job) => j.doneAt !== undefined && t - j.doneAt >= DONE_SHOW_MS
   if ((await read($, jobs)).some(stale)) await update($, jobs, all => all.filter(j => !stale(j)))  // (a write each tick redrew the band each tick)
+  // where no turn's end lists the work in flight, a background job long past its usual time ended unseen, and goes
+  if (!stopHeard && mainTurnsEnded >= 2) await drop($, (await read($, jobs)).filter(j => isStuck(j, t)))
   // a job begun before a (re)load has its estimate looked up again: a run may have taught it meanwhile (learnNow hands a new one to
   // the jobs of its kind still going)
   for (const j of await read($, jobs)) {
@@ -477,7 +488,7 @@ async function onTick($: EngineInterface): Promise<void> {
     }
   }
   const list = await read($, jobs)
-  for (const ids of [rechecked, asked]) for (const id of ids) if (!list.some(j => j.id === id)) ids.delete(id)
+  for (const ids of [rechecked, asked, ending]) for (const id of ids) if (!list.some(j => j.id === id)) ids.delete(id)
   const shown = list.filter(j => isShown(j, t))
   const colour = urgencyOf(shown, t)
   if (colour !== (await read($, urgency))) await update($, urgency, () => colour)
@@ -527,10 +538,13 @@ async function handOff($: EngineInterface, from: string, job: Job): Promise<void
 
 // A job's end: one that succeeded shows "done" a moment and teaches its duration, unless a permission dialog waited on the person;
 // one that failed, was refused or stopped just goes, so a crash after five seconds does not teach a two-hour build that it takes five
-// seconds.
+// seconds. Several events may tell of one end (the stored row, the prompt it is delivered as, a subagent's turn end), even at once:
+// the first takes it before it awaits anything, and the rest, or one after a reload, find it taken or done and teach nothing again.
 async function finish($: EngineInterface, id: string, succeeded: boolean): Promise<void> {
+  if (ending.has(id)) return
+  ending.add(id)
   const job = (await read($, jobs)).find(j => j.id === id)
-  if (job === undefined) return
+  if (job === undefined || job.doneAt !== undefined) return
   const wasAsked = asked.delete(id)
   if (!succeeded) {
     await update($, jobs, list => list.filter(j => j.id !== id))
@@ -578,19 +592,37 @@ async function finishTask($: EngineInterface, end: TaskEnd): Promise<void> {
   if (job !== undefined) await finish($, job.id, end.succeeded)
 }
 
+// A call still running when its loop's turn ended lost its end (a reload dropped the hook awaiting it): no call outlasts its turn.
+const isLost = (j: Job, t: number, agentId: string | undefined): boolean =>
+  j.kind === 'tool' && j.agentId === agentId && j.doneAt === undefined && t - j.startedAt > LOST_AFTER_MS
+
+// A background job far past its usual time, or an hour with none: only where nothing lists the work in flight.
+const isStuck = (j: Job, t: number): boolean =>
+  j.kind === 'background' && j.doneAt === undefined &&
+  t - j.startedAt > (j.expectedMs === null ? UNKNOWN_STUCK_MS : Math.max(STUCK_AFTER * j.expectedMs, MIN_STUCK_MS))
+
 // At a turn's end the engine lists the background work still in flight: a background job not on it ended without a notification
 // this mod read (a missed or reworded one, a task stopped), and goes, teaching nothing (when it ended is not known). Its id is checked
 // against the list only once another job's id is on it, or the list is empty, so a list naming tasks some other way never drops a job
-// that still runs. A call of the main loop never outlasts its turn: one still here lost its end (a reload dropped the hook awaiting
-// it) and goes too; a subagent's may go on in the background.
+// that still runs. A main-loop call that lost its end goes too; a subagent's may go on in the background.
 async function reconcile($: EngineInterface, tasks: ReadonlyArray<{ id: string }>): Promise<void> {
   const t = await $.clock.now()
   const live = new Set(tasks.map(k => k.id))
-  const running = (await read($, jobs)).filter(j => j.doneAt === undefined && t - j.startedAt > 5000)
+  const running = (await read($, jobs)).filter(j => j.doneAt === undefined && t - j.startedAt > LOST_AFTER_MS)
   const idsMatch = running.some(j => j.kind === 'background' && live.has(j.id))
   const gone = running.filter(j => (j.kind === 'background'
     ? !live.has(j.id) && (live.size === 0 || (idsMatch && j.id !== j.callId))
-    : j.agentId === undefined))
+    : isLost(j, t, undefined)))
+  await drop($, gone)
+}
+
+// A loop's turn ended (`turn.complete`, which needs no list): the main loop's or a subagent's calls still here lost their end and go.
+async function dropLost($: EngineInterface, agentId: string | undefined): Promise<void> {
+  const t = await $.clock.now()
+  await drop($, (await read($, jobs)).filter(j => isLost(j, t, agentId)))
+}
+
+async function drop($: EngineInterface, gone: Job[]): Promise<void> {
   if (gone.length === 0) return
   for (const j of gone) asked.delete(j.id)
   await update($, jobs, all => all.filter(j => !gone.some(g => g.id === j.id)))
@@ -682,8 +714,22 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('classic.Stop', async ($, e, next) => {
+    stopHeard = true
     const r = await next(e)
     if (Array.isArray(e.background_tasks)) await reconcile($, e.background_tasks)
+    return r
+  }).catch(($, e, next) => next(e))
+
+  // A plugin of a managed tier may take `session.append` and `classic.Stop` past this one (`next.to`), so ends are read from other
+  // events too: a notification as it is delivered (`prompt.submit`), and a turn's end. A background subagent's ends its job, unless it
+  // waits on background work of its own and so runs on; any loop's end drops its calls that lost their end.
+  on('turn.complete', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId === undefined) mainTurnsEnded++
+    else if ((await $.agent.list().catch(() => [])).find(a => a.id === e.agentId)?.status !== 'waiting') {
+      await finishTask($, { id: e.agentId, succeeded: e.reason === 'answer' })
+    }
+    await dropLost($, e.agentId)
     return r
   }).catch(($, e, next) => next(e))
 
@@ -761,6 +807,8 @@ export const register: Register = on => {
     const origin = e.origin as { kind?: string; asUser?: boolean } | undefined
     const isTyped = origin?.kind === undefined || TYPED.has(origin.kind) || (origin.kind === 'plugin' && origin.asUser === true)
     if (isTyped && e.isMeta !== true && (await read($, isHidden))) await update($, isHidden, () => false)
+    // a notification delivered as a prompt, as the session went idle or into a running turn
+    if (origin?.kind === 'task-notification') for (const end of taskEndsOf(e.text)) await finishTask($, end)
     return next(e)
   }).catch(($, e, next) => next(e))
 }
