@@ -28,7 +28,7 @@ Quick tools (`Read`, `Grep`, `Edit`, …), tools that wait on you (`AskUserQuest
 At the prompt of a terminal Claude Code session:
 
 ```
-/plugin install live-progress --marketplace OWNER/live-progress-claude-mod
+/plugin install live-progress --marketplace jpabich/live-progress-claude-mod
 ```
 
 Answer `y` to add the marketplace, then pick a scope (user scope first).
@@ -36,12 +36,10 @@ Answer `y` to add the marketplace, then pick a scope (user scope first).
 From a shell:
 
 ```bash
-claude plugin install live-progress --marketplace OWNER/live-progress-claude-mod
+claude plugin install live-progress --marketplace jpabich/live-progress-claude-mod
 ```
 
-In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `OWNER/live-progress-claude-mod`, then **Add plugin**.
-
-Replace `OWNER` with the GitHub account the repository is pushed to. A private repository installs only for people who can read it on GitHub and already have a git credential for github.com.
+In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `jpabich/live-progress-claude-mod`, then **Add plugin**.
 
 ## Develop
 
