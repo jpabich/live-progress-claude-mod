@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Job } from '../types'
-import { backgroundIdOf, clawdRows, clockOf, isShown, keyOf, progressOf, taskEndsOf } from './register'
+import { backgroundIdOf, clawdRows, clawdSvg, clockOf, isShown, keyOf, progressOf, taskEndsOf } from './register'
 import type { Cell } from './register'
 
 const BAND = {
@@ -61,6 +61,22 @@ describe('keyOf', () => {
     expect(bash('git commit -m "fix: a -b thing"')).toBe(bash('git commit -m "other words"'))
     expect(bash('make all -j 8 -k')).toBe(bash('make all -k -j 16'))
     expect(bash('./validate.ps1 -OutName run7')).toBe(bash('./validate.ps1 -OutName run8'))
+  })
+
+  test('a wrapper counts by what it runs, a script by its subcommands', () => {
+    expect(bash('timeout 600 pytest')).toBe('Bash:pytest')
+    expect(bash('timeout -k 5 60 ./quick.sh')).toBe('Bash:quick.sh')
+    expect(bash('time npm run build')).toBe('Bash:npm run build')
+    expect(bash('env FOO=1 make all')).toBe('Bash:make all')
+    expect(bash('npx tsx a.ts')).not.toBe(bash('npx tsx b.ts'))
+    expect(bash('python manage.py migrate')).toBe('Bash:manage.py migrate')
+    expect(bash('python manage.py migrate')).not.toBe(bash('python manage.py runserver'))
+  })
+
+  test('quoted free text never counts, a quoted script path does', () => {
+    expect(bash('git commit -m "fix scripts/build.sh"')).toBe('Bash:git commit -m')
+    expect(bash('pwsh -NoProfile -Command "& ./build.ps1"')).toBe('Bash:build.ps1')
+    expect(keyOf('Bash', { command: 'cd foo', description: 'Go to foo' })).toBe('Bash:')
   })
 
   test('a subagent is learned under its type', () => {
@@ -146,7 +162,7 @@ describe('the terminal Clawd', () => {
 
 test('the terminal band is drawn four times a second', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  mock.store(on, { 'd5:Bash:build.sh': 60_000 })
+  mock.store(on, { 'd6:Bash:build.sh': { ms: 60_000, at: 0 } })
   on('tool.call', async () => {
     await clock.sleep(10_000)
     return { result: {}, text: 'ok' }
@@ -175,6 +191,8 @@ test('background ids and notifications are read, several to a row', () => {
   expect(backgroundIdOf({ result: {}, text: 'Command running in background with ID: bg-1a_2' })).toBe('bg-1a_2')
   expect(backgroundIdOf({ result: {}, text: 'Async agent launched. agentId: a7f-3' })).toBe('a7f-3')
   expect(backgroundIdOf({ result: {}, text: 'ok' })).toBeNull()
+  expect(backgroundIdOf({ result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg-9' }, text: 'moved' })).toBe('bg-9')
+  expect(taskEndsOf('<task-id>a</task-id><status>completed</status>')).toEqual([])  // nothing outside a notification
   const said = notification(['bg-1', 'completed'], ['bg-2', 'killed']).message.content[0].text
   expect(taskEndsOf(said)).toEqual([{ id: 'bg-1', callId: undefined, succeeded: true }, { id: 'bg-2', callId: undefined, succeeded: false }])
   expect(taskEndsOf('<task-notification><task-id>x</task-id><tool-use-id>toolu_1</tool-use-id><status>failed</status></task-notification>'))
@@ -320,7 +338,7 @@ describe('background tasks', () => {
 
 test('the terminal keeps Clawd inside the bar past the usual time', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  mock.store(on, { 'd5:Bash:build.sh': 3_000 })
+  mock.store(on, { 'd6:Bash:build.sh': { ms: 3_000, at: 0 } })
   on('tool.call', async () => {
     await clock.sleep(10_000)
     return { result: {}, text: 'ok' }
@@ -335,10 +353,14 @@ test('the terminal keeps Clawd inside the bar past the usual time', async ($, on
     const node = n as Node
     return [...(node.type === 'Box' && node.props?.width === 32 ? [node] : []), ...(node.children ?? []).flatMap(rowsOf)]
   }
-  const [row] = rowsOf(await ui.drawn())
-  const cells = (row.children as Node[]).reduce((sum, child) =>
-    sum + (child.type === 'Box' ? Number(child.props?.width) : (child.children as string[]).join('').length), 0)
-  expect(cells).toBeLessThanOrEqual(32)
+  // Clawd's rows (the bar's own box, filled by a percent, is not one)
+  const rows = rowsOf(await ui.drawn()).filter(r => !(r.children as Node[]).some(c => typeof c.props?.width === 'string'))
+  expect(rows.length).toBeGreaterThanOrEqual(4)  // (a blank row is a box of its own as wide)
+  for (const row of rows) {
+    const cells = (row.children as Node[]).reduce((sum, child) =>
+      sum + (child.type === 'Box' ? Number(child.props?.width) : (child.children as string[]).join('').length), 0)
+    expect(cells).toBeLessThanOrEqual(32)
+  }
   await ui.unmount()
   await clock.advance(5_000)
   await run
@@ -346,7 +368,7 @@ test('the terminal keeps Clawd inside the bar past the usual time', async ($, on
 
 test('a client attaching or leaving gets its pictures made anew', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  mock.store(on, { 'd5:Bash:build.sh': 600_000 })
+  mock.store(on, { 'd6:Bash:build.sh': { ms: 600_000, at: 0 } })
   on('tool.call', async () => {
     await clock.sleep(60_000)
     return { result: {}, text: 'ok' }
@@ -372,5 +394,212 @@ test('a client attaching or leaving gets its pictures made anew', async ($, on) 
   await $.session.detach({ surface: 'desktop', clientId: 'desktop:default', reason: 'detach' })
   expect(await startsAt()).toBe('6% - 40s')
   await clock.advance(20_000)
+  await run
+})
+
+describe('what a run teaches and when a job goes', () => {
+  type Body = Parameters<typeof test>[1]
+  type Engine = Parameters<Body>[0]
+  const engineBand = (on: Parameters<Body>[1]) => {
+    on('ui.render', ($, e) => {
+      const { Text } = $.ui.resolve(e)
+      return <Text>engine</Text>
+    })
+    on('classic.Stop', () => ({}))
+    on('classic.PermissionRequest', () => ({}))
+  }
+  const shows = async ($: Engine, text: RegExp, band: typeof BAND = BAND) => {
+    const ui = await $.ui.mount(band)
+    const found = await ui.find({ type: 'Text', text })
+    await ui.unmount()
+    return found !== undefined
+  }
+  const said = (block: string) => ({
+    message: { type: 'user' as const, role: 'user' as const, content: [{ type: 'text' as const, text: block }] },
+    door: 'queue' as const,
+    origin: { kind: 'task-notification' as const },
+    uuid: `n-${block.length}`,
+  })
+
+  test('a command moved to the background (Ctrl+B) goes on as a task, not done', async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    mock.store(on)
+    engineBand(on)
+    on('tool.call', async () => {
+      await clock.sleep(3_000)
+      return { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg-9', backgroundedByUser: true }, text: 'moved to the background' }
+    })
+    const run = $.tool.call({ tool: 'Bash', command: './long.sh' })
+    await clock.advance(3_000)
+    await run
+    await clock.advance(4_000)
+    expect(await shows($, /long\.sh/)).toBe(true)
+    expect(await shows($, /done in/)).toBe(false)
+    await $.session.append(notification(['bg-9', 'completed']))
+    await clock.advance(4_000)
+    expect(await shows($, /long\.sh/)).toBe(false)
+  })
+
+  test('a tool that waits on the person is not shown', async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    mock.store(on)
+    engineBand(on)
+    on('tool.call', async () => {
+      await clock.sleep(10_000)
+      return { result: {}, text: 'answered' }
+    })
+    const run = $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
+    await clock.advance(5_000)
+    expect(await shows($, /AskUserQuestion/)).toBe(false)
+    await clock.advance(5_000)
+    await run
+  })
+
+  test('a run that waited on a permission dialog teaches nothing', async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    mock.store(on)
+    engineBand(on)
+    on('tool.call', async () => {
+      await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: './build.sh' } })
+      await clock.sleep(5_000)
+      return { result: {}, text: 'ok' }
+    })
+    const first = $.tool.call({ tool: 'Bash', command: './build.sh' })
+    await clock.advance(5_000)
+    await first
+    await clock.advance(4_000)
+    const second = $.tool.call({ tool: 'Bash', command: './build.sh' })
+    await clock.advance(2_500)
+    expect(await shows($, /no ETA yet/)).toBe(true)
+    await clock.advance(5_000)
+    await second
+  })
+
+  test("a turn's end drops a main-loop call that lost its end, not a subagent's", async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    mock.store(on)
+    engineBand(on)
+    on('tool.call', async () => {
+      await clock.sleep(60_000)
+      return { result: {}, text: 'ok' }
+    })
+    const main = $.tool.call({ tool: 'Bash', command: './main.sh' })
+    const sub = $.tool.call({ tool: 'Bash', command: './sub.sh', agentId: 'a1' })
+    await clock.advance(6_000)
+    await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
+    expect(await shows($, /main\.sh/)).toBe(false)
+    expect(await shows($, /sub\.sh/)).toBe(true)
+    await clock.advance(60_000)
+    await Promise.all([main, sub])
+  })
+
+  test("a task the turn's end dropped teaches nothing when its notification comes late", async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    mock.store(on)
+    engineBand(on)
+    on('tool.call', async (_, e) => {
+      if ((e as { run_in_background?: boolean }).run_in_background === true) return { result: {}, text: 'Command running in background with ID: bg-1' }
+      await clock.sleep(10_000)
+      return { result: {}, text: 'ok' }
+    })
+    await $.tool.call({ tool: 'Bash', command: './a.sh', run_in_background: true })
+    await clock.advance(6_000)
+    await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
+    await $.session.append(notification(['bg-1', 'completed']))
+    const again = $.tool.call({ tool: 'Bash', command: './a.sh' })
+    await clock.advance(2_500)
+    expect(await shows($, /no ETA yet/)).toBe(true)
+    await clock.advance(10_000)
+    await again
+  })
+
+  test('a notification is its own row or a queued command, by task or by call; nothing else ends a task', async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    mock.store(on)
+    engineBand(on)
+    const calls: string[] = []
+    on('tool.call', async (_, e) => {
+      calls.push(e.tool_use_id)
+      return e.tool === 'Agent' ? { result: {}, text: 'Async agent launched. agentId: a7f-3' } : { result: {}, text: 'started' }
+    })
+    await $.tool.call({ tool: 'Agent', description: 'Look round', prompt: 'look', subagent_type: 'Explore', run_in_background: true })
+    await $.tool.call({ tool: 'Bash', command: './quiet.sh', run_in_background: true })
+    await clock.advance(3_000)
+    expect(await shows($, /Look round/)).toBe(true)
+    expect(await shows($, /quiet\.sh/)).toBe(true)
+
+    // quoted in a tool's result or a file's attachment: not a notification
+    const quote = '<task-notification><task-id>a7f-3</task-id><status>completed</status></task-notification>'
+    await $.session.append({ ...said(quote), door: 'tool-result', origin: { kind: 'tool', tool: 'Bash' }, uuid: 'q1' })
+    await $.session.append({ message: { type: 'attachment', name: 'nested_memory', content: [{ type: 'text', text: quote }] }, door: 'attachment', origin: { kind: 'engine' }, uuid: 'q2' })
+    await clock.advance(4_000)
+    expect(await shows($, /Look round/)).toBe(true)
+
+    // delivered into a running turn, as a queued command's attachment
+    await $.session.append({ message: { type: 'attachment', name: 'queued_command', content: [{ type: 'text', text: quote }] }, door: 'attachment', origin: { kind: 'engine' }, uuid: 'q3' })
+    // a shell task whose id the call's words did not give: named by the call
+    await $.session.append(said(`<task-notification><task-id>zz</task-id><tool-use-id>${calls[1]}</tool-use-id><status>completed</status></task-notification>`))
+    await clock.advance(4_000)
+    expect(await shows($, /Look round/)).toBe(false)
+    expect(await shows($, /quiet\.sh/)).toBe(false)
+  })
+
+  test('the terminal band shows as many jobs as fit its rows, the latest', async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    mock.store(on, { 'd6:Bash:one.sh': { ms: 600_000, at: 0 }, 'd6:Bash:two.sh': { ms: 600_000, at: 0 }, 'd6:Bash:three.sh': { ms: 600_000, at: 0 } })
+    on('tool.call', async () => {
+      await clock.sleep(60_000)
+      return { result: {}, text: 'ok' }
+    })
+    const runs = []
+    for (const name of ['one', 'two', 'three']) {
+      runs.push($.tool.call({ tool: 'Bash', command: `./${name}.sh` }))
+      await clock.advance(1_000)
+    }
+    const band = (maxRows: number) => ({ ...BAND, props: { ...BAND.props, maxRows } })
+    expect(await shows($, /\+2 more/, band(12))).toBe(true)  // one with Clawd
+    expect(await shows($, /three\.sh/, band(12))).toBe(true)
+    expect(await shows($, /one\.sh/, band(12))).toBe(false)
+    expect(await shows($, /\+1 more/, band(16))).toBe(true)  // two
+    const lean = await $.ui.mount(band(8))  // not even one with Clawd: two without him
+    expect(await lean.find({ type: 'Text', text: /\+1 more/ })).toBeDefined()
+    expect(JSON.stringify(await lean.drawn())).not.toMatch(/[▀▄█]/)
+    await lean.unmount()
+    await clock.advance(60_000)
+    await Promise.all(runs)
+  })
+})
+
+test('the desktop picture stays under the Svg source limit', () => {
+  for (const minutes of [0.05, 1, 3, 10, 60, 299, 300, 301, 1200, 6000]) {
+    const e = minutes * 60_000
+    for (const share of [0, 0.5, 0.86, 1, 1.5, 3]) {
+      const job: Job = { id: 'j', kind: 'tool', label: 'x', key: 'k', startedAt: 1_700_000_000_000, expectedMs: e }
+      expect(clawdSvg(job, job.startedAt + share * e).length).toBeLessThanOrEqual(131_072)
+    }
+  }
+})
+
+test('a typed prompt shows the hidden band again', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on, { 'd6:Bash:build.sh': { ms: 60_000, at: 0 } })
+  on('tool.call', async () => {
+    await clock.sleep(10_000)
+    return { result: {}, text: 'ok' }
+  })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+  const run = $.tool.call({ tool: 'Bash', command: './build.sh' })
+  await clock.settle()
+  const ui = await $.ui.mount(BAND)
+  await ui.press({ key: 'hide' })
+  expect(await ui.find({ type: 'Text', text: /build\.sh/ })).toBeUndefined()
+  await $.prompt.submit({ text: 'go on', asUser: true })
+  expect(await ui.find({ type: 'Text', text: /build\.sh/ })).toBeDefined()
+  await ui.unmount()
+  await clock.advance(10_000)
   await run
 })

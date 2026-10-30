@@ -1,5 +1,6 @@
 {
   "name": "live-progress-claude-mod",
+  "description": "live-progress: a band above the Claude Code prompt showing running tool calls, background tasks and subagents, each with a progress bar by learned ETA.",
   "owner": { "name": "Jerzy Pabich" },
   "plugins": [{ "name": "live-progress", "source": "./" }]
 }

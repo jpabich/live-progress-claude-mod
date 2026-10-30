@@ -13,6 +13,7 @@ const urgency = atom({ plugin: 'live-progress', key: 'urgency' } as const, '#5aa
 const redraw = atom({ plugin: 'live-progress', key: 'redraw' } as const, 0)  // bumped to draw the band again
 
 const QUICK = new Set(['Read', 'Glob', 'Grep', 'Edit', 'Write', 'TodoWrite', 'ToolSearch'])  // too short to show
+const ON_PERSON = new Set(['AskUserQuestion', 'ExitPlanMode', 'EnterPlanMode'])  // waiting on the person, not work: no bar, nothing learned
 const SHOWN = 4
 const BAR_CELLS = 32  // the terminal bar's length, in cells
 const SHOW_AFTER_MS = 2000  // a job shows once it has run this long, or at once when its kind usually takes longer
@@ -23,32 +24,35 @@ const INTERPRETERS = new Set(['python', 'python3', 'py', 'node', 'bun', 'deno', 
 const NAVIGATION = new Set(['cd', 'pushd', 'popd', 'set-location', 'push-location', 'pop-location', 'sl'])
 const SUBCOMMAND = /^[a-z][\w:-]*$/i  // `build`, `run`, `test:unit`; never a file name
 const FLAG_VALUE = /^[a-z][a-z._/\\:-]{0,31}$/i  // a flag's value kept in the key: a mode or a path without digits, never a per-run value
+// Programs that run another: the key is the one they run. Their own flags, counts and durations (`timeout -k 5 600`) and an `env`'s
+// assignments go with them.
+const WRAPPERS = new Set(['time', 'timeout', 'nice', 'nohup', 'sudo', 'env', 'exec', 'command', 'npx', 'bunx', 'pnpx'])
+const WRAPPER_ARG = /^(?:-\S*|\d+(?:\.\d+)?[smhd]?|\w+=\S*)$/
 
 // One command of a chain: the script it runs (its file name) when the command is the script or an interpreter running one, else the
-// program and up to two subcommands; then its flags, with their values when they name a mode or a place, sorted. A pipeline counts by
-// its first program; `cd`, `Set-Location` and the like count for nothing.
+// program; then up to two subcommands (`manage.py migrate`, `npm run build`); then its flags, with their values when they name a mode
+// or a place, sorted. A pipeline counts by its first program; `cd`, `Set-Location` and the like count for nothing.
 const commandKey = (command: string): string => {
   const c = command.split('|')[0].trim()
     .replace(/^\$\w+\s*=\s*/, '').replace(/^&\s*/, '')
     .replace(/^(?:\w+=\S*\s+)+/, '')
     .replace(/^uv run(?:\s+--project\s+\S+)?\s+/, '')
-  const words = c.split(/\s+/).filter(w => w !== '')
+  let words = c.split(/\s+/).filter(w => w !== '')
+  while (words.length > 0 && WRAPPERS.has(words[0].replace(/^.*[\\/]/, '').toLowerCase())) {
+    let n = 1
+    while (n < words.length && WRAPPER_ARG.test(words[n])) n++
+    words = words.slice(n)
+  }
   if (words.length === 0) return ''
   const program = words[0].replace(/^.*[\\/]/, '').replace(/\.exe$/i, '')
   if (NAVIGATION.has(program.toLowerCase())) return ''
   const at = SCRIPT.test(words[0]) ? 0
     : INTERPRETERS.has(program.toLowerCase()) ? words.findIndex((w, i) => i > 0 && SCRIPT.test(w)) : -1
-  let head: string[]
-  let rest: string[]
-  if (at >= 0) {
-    head = [words[at].replace(/^.*[\\/]/, '')]
-    rest = words.slice(at + 1)
-  } else {
-    let n = 1
-    while (n < 3 && n < words.length && SUBCOMMAND.test(words[n])) n++
-    head = [program, ...words.slice(1, n)]
-    rest = words.slice(n)
-  }
+  const from = at >= 0 ? at : 0
+  let n = from + 1
+  while (n < from + 3 && n < words.length && SUBCOMMAND.test(words[n])) n++
+  const head = [at >= 0 ? words[at].replace(/^.*[\\/]/, '') : program, ...words.slice(from + 1, n)]
+  const rest = words.slice(n)
   const flags = new Set<string>()
   rest.forEach((w, i) => {
     if (!/^--?[a-z]/i.test(w)) return
@@ -63,19 +67,21 @@ const commandKey = (command: string): string => {
 
 // What a run is learned under: the tool, then each command of the chain as commandKey says, so `./build.ps1 -Target web` and
 // `./build.ps1 -Quick` learn apart, `npm ci` apart from `npm ci && npm run build`, and `git add build.sh` never as build.sh. Quoted
-// text counts for nothing unless it is a script's path. A subagent by its type; anything else by its skill or description.
+// text counts for nothing unless it is a script's path (a path before any space in it: `"C:\My Scripts\x.ps1"`, not `"fix a/x.sh"`);
+// a command never counts by the free text beside it. A subagent by its type; anything else by its skill or description.
 export const keyOf = (tool: string, e: Record<string, unknown>): string => {
-  let what = ''
+  let what: string
   if (typeof e.command === 'string') {
     const unquoted = e.command.replace(/"([^"]*)"|'([^']*)'/g, (_, d?: string, s?: string) => {
-      const q = d ?? s ?? ''
-      return SCRIPT.test(q) && (!/\s/.test(q) || /[\\/]/.test(q)) ? q.replace(/^.*[\\/]/, '').replace(/\s+/g, '_') : '""'
+      const q = (d ?? s ?? '').replace(/^[&.]\s+/, '')  // `-Command "& ./build.ps1"`, a dot-sourced script
+      return SCRIPT.test(q) && /^\S*[\\/]|^\S+$/.test(q) ? q.replace(/^.*[\\/]/, '').replace(/\s+/g, '_') : '""'
     })
     what = unquoted.split(/\s*(?:&&|\|\||;|\n)\s*/).map(commandKey).filter(k => k !== '').join(' && ')
   } else if (tool === 'Agent') {
     what = typeof e.subagent_type === 'string' ? e.subagent_type : 'general-purpose'
+  } else {
+    what = (typeof e.skill === 'string' ? e.skill : '') || (typeof e.description === 'string' ? e.description : '')
   }
-  what = what || (typeof e.skill === 'string' ? e.skill : '') || (typeof e.description === 'string' ? e.description : '')
   return `${tool}:${what}`.slice(0, 80)
 }
 
@@ -118,8 +124,6 @@ export const progressOf = (job: Job, t: number): Look => {
 export const isShown = (job: Job, t: number): boolean =>
   (job.doneAt ?? t) - job.startedAt >= SHOW_AFTER_MS || (job.expectedMs ?? 0) >= SHOW_AFTER_MS
 
-const MOOD_COLOUR: Record<Look['mood'], string> = { run: 'green', near: 'yellow', over: 'red', sleep: 'cyan', done: 'green' }
-
 // Clawd, animated, the band's full width. On the desktop one SVG a job: SMIL moves Clawd and the bar from where the job is at the
 // drawing to the end of its usual time, switches the words, turns him red past the usual time, and walks his legs in a four-step
 // cycle. In a terminal, which draws no SVG, the same sprite in half-block cells (clawdRows).
@@ -158,13 +162,14 @@ const body = (colour: string): string =>
       `<animate attributeName="x" values="${x * PX};${x * PX};${x * PX - 1.5};${x * PX - 1.5};${x * PX + 1.5};${x * PX + 1.5};${x * PX}" keyTimes="0;0.88;0.9;0.93;0.95;0.98;1" dur="20s" repeatCount="indefinite" calcMode="discrete"/>`))).join('')
 
 // Dust kicked up as he walks (to the right): a puff at each footfall, twice a walk cycle, from behind his back feet (the two back
-// legs in turn). Each puff is a little cloud of two circles that swells as it drifts back and up, and fades.
+// legs in turn: the second lands a quarter cycle in, the first three quarters in). Each puff is a little cloud of two circles that
+// swells as it drifts back and up, and fades.
 const DUST_S = STEP_S * 2  // a puff's life: four puffs alive at once, one a footfall
 const DUST = '<defs><filter id="dust" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="0.7"/></filter></defs>' +
   '<g filter="url(#dust)" shape-rendering="auto">' + [0, 1, 2, 3].map(i => {
-    const x = (i % 2 === 0 ? 2 : 3) * PX  // at the back foot
+    const x = LEG_X[i % 2 === 0 ? 1 : 0] * PX  // at the back of the foot that lands
     const y = 5 * PX + 0.5  // on the ground under his feet
-    const timing = `dur="${DUST_S}s" begin="${(i * STEP_S / 2).toFixed(2)}s" repeatCount="indefinite"`
+    const timing = `dur="${DUST_S}s" begin="${(STEP_S / 4 + i * STEP_S / 2).toFixed(2)}s" repeatCount="indefinite"`
     const cloud = ([dx, dy, k]: number[]) =>
       `<circle cx="${x + dx}" cy="${y + dy}" r="0" fill="#e2d8ca" opacity="0">` +
       `<animate attributeName="cx" values="${x + dx};${x + dx - 9 * k};${x + dx - 15 * k}" keyTimes="0;0.4;1" ${timing}/>` +
@@ -294,8 +299,10 @@ export const clawdSvg = (job: Job, t0: number): string => {
 
 // A picture animates from the moment its frame loads, as from the time it was made: a frame loaded again later (the desktop showing
 // the session again after another one) would start over from that old time, the bar back near where it was then. So a picture is
-// made anew once a client attaches or leaves, and once it is REFRESH_MS old; otherwise it is kept while its estimate and its end
-// stay the same, whenever the band is drawn again (a typed prompt, another job), since each new source reloads the frame, a blink.
+// made anew once a client attaches or leaves. Otherwise it is kept while its estimate and its end stay the same, whenever the band
+// is drawn again (a typed prompt, another job), since each new source reloads the frame, a blink; only a draw that finds it
+// REFRESH_MS old makes it anew, which mends a frame reloaded without an attach. Nothing draws the band for that alone: the mending
+// waits for the next draw that comes.
 const REFRESH_MS = 60e3
 const pictures = new Map<string, { sig: string; at: number; svg: string }>()
 const pictureOf = (job: Job, t: number): string => {
@@ -374,25 +381,37 @@ const runsOf = (row: Cell[]): Array<Cell & { n: number }> => {
 
 // The functions `$` is handed to are top-level declarations (the engine follows `$` only into those).
 let tick: { cancel: () => void } | null = null
-let serial = 0  // ids for tool calls that came without one
+let tickMs = 0
+let drawsCells = true  // whether the band was last drawn in cells (a terminal's Clawd, redrawn each frame) or as pictures
 let shownSig = ''  // the jobs shown at the last tick: a change draws the band again
 const rechecked = new Set<string>()  // module state: empty again after each reload
 const learning = new Map<string, Promise<void>>()  // one learn at a time a key, so two runs ending together both count
-// Background jobs a turn's end found gone before their notification came: what the notification needs to learn from them.
-const ended = new Map<string, { key: string; ms: number }>()
+const asked = new Set<string>()  // jobs a permission dialog was put up for: the person's wait is no part of the run, which teaches nothing
 
-// Learned durations live under STORE, keyed by keyOf; a change to what keyOf makes of a command takes a new prefix.
-const STORE = 'd5:'
+// Learned durations live under STORE, keyed by keyOf, each `{ ms, at }`: the typical duration and when it was last taught. A change
+// to what keyOf makes of a command takes a new prefix; session.start clears the old ones and, past MAX_KEYS, the least lately taught.
+const STORE = 'd6:'
+const OLD_STORE = /^d\d+:/
+const MAX_KEYS = 1000
+
+type Learned = { ms: number; at: number }
+const learnedOf = (v: unknown): Learned | null => {
+  const l = v as Partial<Learned> | null
+  return typeof l === 'object' && l !== null && typeof l.ms === 'number' ? { ms: l.ms, at: typeof l.at === 'number' ? l.at : 0 } : null
+}
 
 async function expected($: EngineInterface, key: string): Promise<number | null> {
-  const v = await $.store.get(`${STORE}${key}`)
-  return typeof v === 'number' ? v : null
+  return learnedOf(await $.store.get(`${STORE}${key}`))?.ms ?? null
 }
 
 async function learnNow($: EngineInterface, key: string, ms: number): Promise<void> {
   const old = await expected($, key)
   if (old === null && ms < SHOW_AFTER_MS) return  // a quick command of a new kind is not worth a key
-  await $.store.set(`${STORE}${key}`, old === null ? ms : Math.round(0.6 * old + 0.4 * ms))  // the typical duration, recent runs weighed more
+  const typical = old === null ? ms : Math.round(0.6 * old + 0.4 * ms)  // the typical duration, recent runs weighed more
+  await $.store.set(`${STORE}${key}`, { ms: typical, at: await $.clock.now() })
+  // a first run of the same kind still going has its estimate now
+  const isFirst = (j: Job) => j.key === key && j.expectedMs === null && j.doneAt === undefined
+  if ((await read($, jobs)).some(isFirst)) await update($, jobs, all => all.map(j => (isFirst(j) ? { ...j, expectedMs: typical } : j)))
 }
 
 function learn($: EngineInterface, key: string, ms: number): Promise<void> {
@@ -401,6 +420,18 @@ function learn($: EngineInterface, key: string, ms: number): Promise<void> {
   learning.set(key, settled)
   void settled.then(() => { if (learning.get(key) === settled) learning.delete(key) })
   return run
+}
+
+async function tidyStore($: EngineInterface): Promise<void> {
+  const mine: Array<{ key: string; at: number }> = []
+  for (const key of await $.store.keys()) {
+    if (key.startsWith(STORE)) mine.push({ key, at: 0 })
+    else if (OLD_STORE.test(key)) await $.store.delete(key)
+  }
+  if (mine.length <= MAX_KEYS) return
+  for (const m of mine) m.at = learnedOf(await $.store.get(m.key))?.at ?? 0
+  mine.sort((a, b) => a.at - b.at)
+  for (const m of mine.slice(0, mine.length - MAX_KEYS)) await $.store.delete(m.key)
 }
 
 // The frame's colour: red once a job is past its usual time, yellow once one is near it, cyan while none has an estimate, else green.
@@ -415,16 +446,17 @@ async function onTick($: EngineInterface): Promise<void> {
   await update($, now, () => t)
   const stale = (j: Job) => j.doneAt !== undefined && t - j.doneAt >= DONE_SHOW_MS
   if ((await read($, jobs)).some(stale)) await update($, jobs, all => all.filter(j => !stale(j)))  // (a write each tick redrew the band each tick)
-  // a job's estimate is looked up again on the first tick after a (re)load, and while it has none: another run may have taught it
+  // a job begun before a (re)load has its estimate looked up again: a run may have taught it meanwhile (learnNow hands a new one to
+  // the jobs of its kind still going)
   for (const j of await read($, jobs)) {
-    if (j.expectedMs === null || !rechecked.has(j.id)) {
+    if (!rechecked.has(j.id)) {
       rechecked.add(j.id)
       const e = await expected($, j.key)
       if (e !== j.expectedMs) await update($, jobs, all => all.map(x => (x.id === j.id ? { ...x, expectedMs: e } : x)))
     }
   }
   const list = await read($, jobs)
-  for (const id of rechecked) if (!list.some(j => j.id === id)) rechecked.delete(id)
+  for (const ids of [rechecked, asked]) for (const id of ids) if (!list.some(j => j.id === id)) ids.delete(id)
   const shown = list.filter(j => isShown(j, t))
   const colour = urgencyOf(shown, t)
   if (colour !== (await read($, urgency))) await update($, urgency, () => colour)
@@ -434,7 +466,9 @@ async function onTick($: EngineInterface): Promise<void> {
     shownSig = sig
     await update($, redraw, n => n + 1)
   }
-  if (list.length === 0 && tick !== null) {
+  if (list.length > 0) {
+    ensureTick($)  // at the rate the surface drawn on last asks
+  } else if (tick !== null) {
     tick.cancel()
     tick = null
     // a job started while this tick ran found the old timer still set: it gets a new one
@@ -442,43 +476,75 @@ async function onTick($: EngineInterface): Promise<void> {
   }
 }
 
-// The clock, a tick each FRAME_MS for the terminal's Clawd (the desktop's picture does not follow it); a reload drops the old
-// module's timer, so `session.start` (run again by a reload) calls this too.
+// The clock: a tick each FRAME_MS while the band is drawn in cells, for the terminal's Clawd; else each IDLE_MS, as the desktop's
+// picture animates itself and the clock only ends jobs and recolours the frame. A reload drops the old module's timer, so
+// `session.start` (run again by a reload) calls this too.
+const IDLE_MS = 1000
 function ensureTick($: EngineInterface): void {
-  if (tick === null) tick = $.clock.every(FRAME_MS, () => onTick($))
+  const ms = drawsCells ? FRAME_MS : IDLE_MS
+  if (tick !== null && tickMs === ms) return
+  tick?.cancel()
+  tickMs = ms
+  tick = $.clock.every(ms, () => onTick($))
 }
 
 async function start($: EngineInterface, job: Job): Promise<void> {
+  rechecked.add(job.id)  // its estimate was just read
   await update($, jobs, list => [...list.filter(j => j.id !== job.id), job])
   await update($, now, () => job.startedAt)
   ensureTick($)
 }
 
-// A job's end: one that succeeded shows "done" a moment and teaches its duration; one that failed, was refused or stopped just goes,
-// so a crash after five seconds does not teach a two-hour build that it takes five seconds.
+// A call that left a background task running becomes the task's job in one write, keeping its picture (its frame is not reloaded).
+async function handOff($: EngineInterface, from: string, job: Job): Promise<void> {
+  rechecked.add(job.id)
+  if (asked.delete(from)) asked.add(job.id)
+  const kept = pictures.get(from)
+  if (kept !== undefined) pictures.set(job.id, kept)
+  await update($, jobs, list => [...list.filter(j => j.id !== from && j.id !== job.id), job])
+}
+
+// A job's end: one that succeeded shows "done" a moment and teaches its duration, unless a permission dialog waited on the person;
+// one that failed, was refused or stopped just goes, so a crash after five seconds does not teach a two-hour build that it takes five
+// seconds.
 async function finish($: EngineInterface, id: string, succeeded: boolean): Promise<void> {
   const job = (await read($, jobs)).find(j => j.id === id)
   if (job === undefined) return
+  const wasAsked = asked.delete(id)
   if (!succeeded) {
     await update($, jobs, list => list.filter(j => j.id !== id))
     return
   }
   const t = await $.clock.now()
   await update($, jobs, list => list.map(j => (j.id === id ? { ...j, doneAt: t } : j)))
-  await learn($, job.key, t - job.startedAt)
+  if (!wasAsked) await learn($, job.key, t - job.startedAt)
 }
 
-// What a background call answers with: a shell's `… running in background with ID: <id>`, an agent's `agentId: <id>`.
+// A permission dialog put up for a call (a settings hook answering puts up none): the jobs of that call wait on the person.
+async function markAsked($: EngineInterface, tool: string, input: unknown): Promise<void> {
+  if (typeof input !== 'object' || input === null) return
+  const key = keyOf(tool, input as Record<string, unknown>)
+  for (const j of await read($, jobs)) if (j.key === key && j.kind === 'tool' && j.doneAt === undefined) asked.add(j.id)
+}
+
+// The background task a call left running: a shell's record names it (`backgroundTaskId`, also when the person pressed Ctrl+B or the
+// command hit its timeout), else its words do: `… running in background with ID: <id>`, an agent's `agentId: <id>`.
+const taskIdOf = (ran: ToolCallResult): string | undefined => {
+  const record = ran.result as { backgroundTaskId?: unknown } | null | undefined
+  return typeof record === 'object' && record !== null && typeof record.backgroundTaskId === 'string' ? record.backgroundTaskId : undefined
+}
 export const backgroundIdOf = (ran: ToolCallResult): string | null => {
+  const id = taskIdOf(ran)
+  if (id !== undefined) return id
   const said = typeof ran.text === 'string' ? ran.text : JSON.stringify(ran.result ?? '')
   return /(?:background with ID|agentId)[:=]?\s*"?([\w-]+)/.exec(said)?.[1] ?? null
 }
 
 // The background tasks a notification row says ended: each one's id, the call that started it when it says, and whether it succeeded.
-// A row may carry several notifications; each is read on its own.
+// A row may carry several notifications; each is read on its own, and nothing outside one.
 export type TaskEnd = { id: string; callId?: string; succeeded: boolean }
 export const taskEndsOf = (said: string): TaskEnd[] =>
-  (said.match(/<task-notification>[\s\S]*?<\/task-notification>/g) ?? [said]).flatMap(block => {
+  (said.match(/<task-notification>[\s\S]*?<\/task-notification>/g) ?? []).flatMap(block => {
     const id = /<task-id>([\w-]+)<\/task-id>/.exec(block)?.[1]
     const status = /<status>(completed|failed|killed|stopped)<\/status>/.exec(block)?.[1]
     const callId = /<tool-use-id>([\w-]+)<\/tool-use-id>/.exec(block)?.[1]
@@ -488,32 +554,24 @@ export const taskEndsOf = (said: string): TaskEnd[] =>
 async function finishTask($: EngineInterface, end: TaskEnd): Promise<void> {
   const names = (id: string) => id === end.id || (end.callId !== undefined && id === end.callId)
   const job = (await read($, jobs)).find(j => names(j.id) || (j.callId !== undefined && names(j.callId)))
-  if (job !== undefined) return finish($, job.id, end.succeeded)
-  // found gone at a turn's end before its notification: learned from then
-  const gone = ended.get(end.id) ?? (end.callId !== undefined ? ended.get(end.callId) : undefined)
-  if (gone === undefined) return
-  ended.delete(end.id)
-  if (end.callId !== undefined) ended.delete(end.callId)
-  if (end.succeeded) await learn($, gone.key, gone.ms)
+  if (job !== undefined) await finish($, job.id, end.succeeded)
 }
 
 // At a turn's end the engine lists the background work still in flight: a background job not on it ended without a notification
-// this mod read (a missed or reworded one, a task stopped), and goes. Its id is checked against the list only once another job's id
-// is on it, or the list is empty, so a list naming tasks some other way never drops a job that still runs.
+// this mod read (a missed or reworded one, a task stopped), and goes, teaching nothing (when it ended is not known). Its id is checked
+// against the list only once another job's id is on it, or the list is empty, so a list naming tasks some other way never drops a job
+// that still runs. A call of the main loop never outlasts its turn: one still here lost its end (a reload dropped the hook awaiting
+// it) and goes too; a subagent's may go on in the background.
 async function reconcile($: EngineInterface, tasks: ReadonlyArray<{ id: string }>): Promise<void> {
   const t = await $.clock.now()
   const live = new Set(tasks.map(k => k.id))
-  const list = await read($, jobs)
-  const background = list.filter(j => j.kind === 'background' && j.doneAt === undefined && t - j.startedAt > 5000)
-  const idsMatch = background.some(j => live.has(j.id))
-  const gone = background.filter(j => !live.has(j.id) && (live.size === 0 || (idsMatch && j.id !== j.callId)))
+  const running = (await read($, jobs)).filter(j => j.doneAt === undefined && t - j.startedAt > 5000)
+  const idsMatch = running.some(j => j.kind === 'background' && live.has(j.id))
+  const gone = running.filter(j => (j.kind === 'background'
+    ? !live.has(j.id) && (live.size === 0 || (idsMatch && j.id !== j.callId))
+    : j.agentId === undefined))
   if (gone.length === 0) return
-  for (const j of gone) {
-    const was = { key: j.key, ms: t - j.startedAt }
-    ended.set(j.id, was)
-    if (j.callId !== undefined) ended.set(j.callId, was)
-  }
-  while (ended.size > 50) ended.delete(ended.keys().next().value as string)
+  for (const j of gone) asked.delete(j.id)
   await update($, jobs, all => all.filter(j => !gone.some(g => g.id === j.id)))
 }
 
@@ -523,11 +581,18 @@ async function freshPictures($: EngineInterface): Promise<void> {
   await update($, redraw, n => n + 1)
 }
 
+// The terminal band's rows: a job's are Clawd's four, the bar and the label; the frame's are the border and the footer.
+const JOB_ROWS = AIR_H / 2 + 2
+const LEAN_ROWS = 2  // a job without Clawd, where the band has no room for even one with him
+const FRAME_ROWS = 3
+const TYPED = new Set(['composer', 'bridge', 'sdk', 'slack-ping'])  // a prompt of the person's own
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     if ((await read($, jobs)).length > 0) ensureTick($)  // jobs begun before a reload go on ticking
     await update($, redraw, n => n + 1)  // the band drawn again by the new code
+    await tidyStore($)
     return r
   })
 
@@ -545,67 +610,90 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     const tool = String(e.tool)
-    if (QUICK.has(tool) || tool.startsWith('mcp__')) return next(e)
+    if (QUICK.has(tool) || ON_PERSON.has(tool) || tool.startsWith('mcp__')) return next(e)
     const args = e as unknown as Record<string, unknown>
+    const callId = e.tool_use_id
     const startedAt = await $.clock.now()
-    const callId = e.tool_use_id ?? `${tool}-${startedAt}-${++serial}`
     const key = keyOf(tool, args)
     const label = labelOf(tool, args)
     const expectedMs = await expected($, key)
-    await start($, { id: callId, kind: tool === 'Agent' ? 'agent' : 'tool', label, key, startedAt, expectedMs })
+    await start($, { id: callId, kind: 'tool', label, key, startedAt, expectedMs, agentId: e.agentId })
+    let ran: ToolCallResult
     try {
-      const ran = await next(e)
+      ran = await next(e)
+    } catch (err) {
+      await finish($, callId, false).catch(() => undefined)
+      throw err
+    }
+    try {
       const failed = ran.deny !== undefined || ran.isError === true
-      if (args.run_in_background === true && !failed) {
-        // the call returned at once: the work goes on as a background task until its notification, or a turn's end finds it gone
-        await finish($, callId, false)
-        await start($, { id: backgroundIdOf(ran) ?? callId, callId, kind: 'background', label, key, startedAt, expectedMs })
+      if (!failed && (args.run_in_background === true || taskIdOf(ran) !== undefined)) {
+        // the call returned while its work goes on as a background task (asked for, Ctrl+B, a timeout), until its notification, or a
+        // turn's end finds it gone
+        await handOff($, callId, { id: backgroundIdOf(ran) ?? callId, callId, kind: 'background', label, key, startedAt, expectedMs, agentId: e.agentId })
       } else {
         await finish($, callId, !failed)
       }
-      return ran
-    } catch (err) {
-      await finish($, callId, false)
-      throw err
+    } catch {
+      // the band's bookkeeping never fails a call that has run: at worst its job waits for a turn's end
     }
-  })
+    return ran
+  }).catch(($, e, next) => next(e))
 
-  // A background task's end: the notification row names it. Only notification rows are read, never a tool's output or a reply that
-  // quotes one.
+  // The dialog asking the person to allow a call.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const r = await next(e)
+    if (r.decision === undefined) await markAsked($, e.tool_name, e.tool_input)
+    return r
+  }).catch(($, e, next) => next(e))
+
+  // A background task's end: the notification row names it, as a row of its own or delivered into a running turn (a queued command's
+  // attachment). Only those rows are read, never a tool's output, a file or a reply that quotes one.
   on('session.append', async ($, e, next) => {
-    if ((e.origin as { kind?: string }).kind === 'task-notification' || e.message.type === 'attachment') {
+    const r = await next(e)
+    const isNotice = (e.origin as { kind?: string }).kind === 'task-notification' ||
+      (e.message.type === 'attachment' && e.message.name === 'queued_command')
+    if (isNotice) {
       const said = JSON.stringify(e.message.content)
       if (said.includes('<task-id>')) for (const end of taskEndsOf(said)) await finishTask($, end)
     }
-    return next(e)
-  })
+    return r
+  }).catch(($, e, next) => next(e))
 
   on('classic.Stop', async ($, e, next) => {
     const r = await next(e)
     if (Array.isArray(e.background_tasks)) await reconcile($, e.background_tasks)
     return r
-  })
+  }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const list = await read($, jobs)
     if (e.props.hasSurvey || list.length === 0 || (await read($, isHidden))) return next(e)
     await read($, redraw)
-    const { Box, Button, Text, Svg } = $.ui.resolve(e) as any
+    const table = $.ui.resolve(e)
+    const { Box, Button, Text } = table
     // the picture on the desktop; the terminal's table has no Svg, but what resolve hands back there is not undefined either
-    const isPicture = e.surface !== 'terminal' && Svg !== undefined
+    const Svg = e.surface !== 'terminal' && 'Svg' in table ? table.Svg : undefined
+    const isPicture = Svg !== undefined
+    drawsCells = !isPicture
     // the terminal redraws each tick by `now`; the desktop's picture animates itself, so it reads the clock without subscribing
     const t = isPicture ? await $.clock.now() : await read($, now)
     const visible = list.filter(j => isShown(j, t))
     if (visible.length === 0) return next(e)
     if (isPicture) for (const id of pictures.keys()) if (!list.some(j => j.id === id)) pictures.delete(id)
-    const shown = [...visible].sort((a, b) => a.startedAt - b.startedAt).slice(-SHOWN)
+    // the terminal's band holds maxRows rows: as many jobs as fit there, the latest, Clawd left out where not even one fits with him
+    const room = e.props.maxRows - FRAME_ROWS
+    const hasClawd = isPicture || room >= JOB_ROWS
+    const fits = isPicture ? SHOWN : Math.max(1, Math.min(SHOWN, Math.floor(room / (hasClawd ? JOB_ROWS : LEAN_ROWS))))
+    const shown = [...visible].sort((a, b) => a.startedAt - b.startedAt).slice(-fits)
     return (
       <Box flexDirection="column" borderStyle="round" borderColor={await read($, urgency)} paddingX={1}>
         {shown.map(job => {
           const p = progressOf(job, t)
+          const key = job.callId ?? job.id  // the same through a call's hand-off to its background task
           if (isPicture) {
             return (
-              <Box key={job.id} flexDirection="column">
+              <Box key={key} flexDirection="column">
                 <Svg source={pictureOf(job, t)} alt="Clawd walking along the job's progress bar" height={CLAWD_H} isInteractive />
                 <Text dimColor>{job.label}</Text>
               </Box>
@@ -614,41 +702,44 @@ export const register: Register = on => {
           const isAsleep = p.mood === 'sleep'
           const sweepLead = Math.round(p.share * (BAR_CELLS - 2))
           return (
-            <Box key={job.id} flexDirection="column">
+            <Box key={key} flexDirection="column">
               {/* Clawd and the bar are laid out in cells, not drawn in characters: a constant length whatever the font */}
-              {clawdRows(job, t).map((row, y) => (
+              {hasClawd ? clawdRows(job, t).map((row, y) => (
                 <Box key={y} width={BAR_CELLS}>
                   {runsOf(row).map((r, i) => r.ch.trim() === ''
                     ? <Box key={i} width={r.n}><Text> </Text></Box>
                     : <Text key={i} color={r.fg} backgroundColor={r.bg}>{r.ch}</Text>)}
                 </Box>
-              ))}
+              )) : null}
               <Box>
                 <Box width={BAR_CELLS} backgroundColor="#3a3a38">
                   {isAsleep
                     ? <Box width={BAR_CELLS}>
                         {sweepLead > 0 ? <Box width={sweepLead}><Text> </Text></Box> : null}
-                        <Box width={2} backgroundColor={MOOD_COLOUR.sleep}><Text> </Text></Box>
+                        <Box width={2} backgroundColor={FILL_HEX.sleep}><Text> </Text></Box>
                       </Box>
-                    : <Box width={`${Math.max(1, Math.round(p.share * 100))}%`} backgroundColor={MOOD_COLOUR[p.mood]}><Text> </Text></Box>}
+                    : <Box width={`${Math.max(1, Math.round(p.share * 100))}%`} backgroundColor={FILL_HEX[p.mood]}><Text> </Text></Box>}
                 </Box>
                 <Text> </Text>
-                <Text bold color={MOOD_COLOUR[p.mood]}>{p.words}{p.mood === 'run' || p.mood === 'near' ? ` - ends ${hhmm(job.startedAt + (job.expectedMs as number))}` : ''}</Text>
+                <Text bold color={FILL_HEX[p.mood]}>{p.words}{p.mood === 'run' || p.mood === 'near' ? ` - ends ${hhmm(job.startedAt + (job.expectedMs as number))}` : ''}</Text>
               </Box>
               <Text dimColor>{job.label}</Text>
             </Box>
           )
         })}
         <Box justifyContent="space-between">
-          <Text dimColor>{visible.length > SHOWN ? `+${visible.length - SHOWN} more` : ' '}</Text>
+          <Text dimColor>{visible.length > shown.length ? `+${visible.length - shown.length} more` : ' '}</Text>
           <Button key="hide" label="Hide" onPress={() => update($, isHidden, () => true)} />
         </Box>
       </Box>
     )
   })
 
+  // A new prompt of the person's shows the band again; a notification's or a trigger's turn leaves it hidden.
   on('prompt.submit', async ($, e, next) => {
-    await update($, isHidden, () => false)  // a new prompt shows the band again
+    const origin = e.origin as { kind?: string; asUser?: boolean } | undefined
+    const isTyped = origin?.kind === undefined || TYPED.has(origin.kind) || (origin.kind === 'plugin' && origin.asUser === true)
+    if (isTyped && e.isMeta !== true && (await read($, isHidden))) await update($, isHidden, () => false)
     return next(e)
-  })
+  }).catch(($, e, next) => next(e))
 }

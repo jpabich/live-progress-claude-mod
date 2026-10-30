@@ -3,7 +3,9 @@ export type Job = {
   id: string
   /** a background job's: the tool call that started it, which its notification may name instead of the task's id */
   callId?: string
-  kind: 'tool' | 'background' | 'agent'
+  kind: 'tool' | 'background'
+  /** the subagent loop the call runs in; absent on the main loop, whose calls never outlast its turn */
+  agentId?: string
   label: string
   /** the history key its duration is learned under */
   key: string
