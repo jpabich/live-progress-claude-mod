@@ -1,0 +1,6 @@
+# written by Claude Code when the mod loads
+.claude-plugin/types/
+.mcpb-cache/
+*.log
+.DS_Store
+Thumbs.db

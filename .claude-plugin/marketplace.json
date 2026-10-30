@@ -1,0 +1,5 @@
+{
+  "name": "live-progress-claude-mod",
+  "owner": { "name": "Jerzy Pabich" },
+  "plugins": [{ "name": "live-progress", "source": "./" }]
+}
