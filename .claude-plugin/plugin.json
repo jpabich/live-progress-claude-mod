@@ -1,1 +1,16 @@
-{ "name": "live-progress", "version": "0.1.2", "description": "A band above the prompt: what runs now (tool calls, background builds and tests, subagents) with a progress bar by learned ETA, redrawn locally, no model tokens.", "author": { "name": "Jerzy Pabich" }, "types": "./types/index.d.ts", "license": "MIT" }
+{
+  "name": "live-progress",
+  "version": "0.1.2",
+  "description": "A band above the prompt: what runs now (tool calls, background builds and tests, subagents) with a progress bar by learned ETA, redrawn locally, no model tokens.",
+  "author": { "name": "Jerzy Pabich" },
+  "types": "./types/index.d.ts",
+  "license": "MIT",
+  "userConfig": {
+    "clawd": {
+      "type": "boolean",
+      "title": "Clawd in the terminal",
+      "description": "Draw Clawd walking above each progress bar in the CLI. Off: only the bar and the job's label, two rows a job, so more jobs fit. The desktop app always draws him.",
+      "default": true
+    }
+  }
+}

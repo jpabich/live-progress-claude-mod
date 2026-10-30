@@ -407,7 +407,7 @@ const runsOf = (row: Cell[]): Array<Cell & { n: number }> => {
 // The functions `$` is handed to are top-level declarations (the engine follows `$` only into those).
 let tick: { cancel: () => void } | null = null
 let tickMs = 0
-let drawsCells = true  // whether the band was last drawn in cells (a terminal's Clawd, redrawn each frame) or as pictures
+let drawsCells = true  // whether the band last drew the terminal's Clawd in cells (redrawn each frame): not as pictures, nor bars alone
 let shownSig = ''  // the jobs shown at the last tick: a change draws the band again
 const rechecked = new Set<string>()  // module state: empty again after each reload
 const learning = new Map<string, Promise<void>>()  // one learn at a time a key, so two runs ending together both count
@@ -508,8 +508,8 @@ async function onTick($: EngineInterface): Promise<void> {
   }
 }
 
-// The clock: a tick each FRAME_MS while the band is drawn in cells, for the terminal's Clawd; else each IDLE_MS, as the desktop's
-// picture animates itself and the clock only ends jobs and recolours the frame. A reload drops the old module's timer, so
+// The clock: a tick each FRAME_MS while the terminal draws Clawd in cells; else each IDLE_MS, as the desktop's picture animates
+// itself, a bar alone moves by the second, and the clock only ends jobs and recolours the frame. A reload drops the old module's timer, so
 // `session.start` (run again by a reload) calls this too.
 const IDLE_MS = 1000
 function ensureTick($: EngineInterface): void {
@@ -640,7 +640,9 @@ const LEAN_ROWS = 2  // a job without Clawd, where the band has no room for even
 const FRAME_ROWS = 3
 const TYPED = new Set(['composer', 'bridge', 'sdk', 'slack-ping'])  // a prompt of the person's own
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const wantsClawd = options.clawd !== false  // the `clawd` option: off, the terminal draws each job as its bar and label alone
+
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     if ((await read($, jobs)).length > 0) ensureTick($)  // jobs begun before a reload go on ticking
@@ -742,15 +744,16 @@ export const register: Register = on => {
     // the picture on the desktop; the terminal's table has no Svg, but what resolve hands back there is not undefined either
     const Svg = e.surface !== 'terminal' && 'Svg' in table ? table.Svg : undefined
     const isPicture = Svg !== undefined
-    drawsCells = !isPicture
+    // the terminal's band holds maxRows rows: as many jobs as fit there, the latest, Clawd left out where not even one fits with him
+    // or the `clawd` option is off
+    const room = e.props.maxRows - FRAME_ROWS
+    const hasClawd = isPicture || (wantsClawd && room >= JOB_ROWS)
+    drawsCells = !isPicture && hasClawd  // without Clawd nothing moves between seconds: the clock ticks each IDLE_MS
     // the terminal redraws each tick by `now`; the desktop's picture animates itself, so it reads the clock without subscribing
     const t = isPicture ? await $.clock.now() : await read($, now)
     const visible = list.filter(j => isShown(j, t))
     if (visible.length === 0) return next(e)
     if (isPicture) for (const id of pictures.keys()) if (!list.some(j => j.id === id)) pictures.delete(id)
-    // the terminal's band holds maxRows rows: as many jobs as fit there, the latest, Clawd left out where not even one fits with him
-    const room = e.props.maxRows - FRAME_ROWS
-    const hasClawd = isPicture || room >= JOB_ROWS
     const fits = isPicture ? SHOWN : Math.max(1, Math.min(SHOWN, Math.floor(room / (hasClawd ? JOB_ROWS : LEAN_ROWS))))
     const shown = [...visible].sort((a, b) => a.startedAt - b.startedAt).slice(-fits)
     return (

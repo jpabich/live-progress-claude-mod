@@ -11,7 +11,7 @@ A Claude Code mod: a band above the prompt showing what is running right now (lo
 ![live-progress in a terminal](assets/demo-cli.gif)
 
 - In the desktop app, Clawd walks along an animated SVG bar, kicking up dust: he hops half way, the bar turns yellow near the usual end, and past it he goes red and sweats. A first run of its kind, with no ETA yet, has him dozing while a bar sweeps; when a job ends he jumps with confetti.
-- In the CLI, the same Clawd in half-block characters (11 cells by 3 rows under a row of air for his hops, redrawn four times a second) does the same over a cell-laid bar with `% - elapsed - ETA - ends HH:MM`.
+- In the CLI, the same Clawd in half-block characters (11 cells by 3 rows under a row of air for his hops, redrawn four times a second) does the same over a cell-laid bar with `% - elapsed - ETA - ends HH:MM`. With the `clawd` option off, the CLI draws only the bar and the job's label: two rows a job instead of six.
 - The band's frame shows the most urgent job: green, yellow near the usual end, red past it, cyan while no job has an ETA.
 - Up to four jobs show at once, the latest ones, with `+N more` for the rest (in the CLI, as many as fit the band's rows, without Clawd where not even one fits with him); a finished job stays 3 s with its `done in` time.
 - Durations are learned per command kind (exponential average kept in the mod's store), so the second run of something gets an ETA. A kind is the script being run (by file name) or the program, with up to two subcommands (`manage.py migrate`, `npm run build`), plus the flags given, with their values when they name a mode or a place (`-Target web`, not `-OutName run7`). Each command of a chain counts, `cd`/`Set-Location` don't, and wrappers (`timeout`, `time`, `sudo`, `env`, `npx`, …) count by what they run: `./build.ps1 -Quick` and `./build.ps1 -Target web` learn apart, as do `npm ci` and `npm ci && npm run build`. Subagents learn by their type.
@@ -50,6 +50,14 @@ claude plugin install live-progress@live-progress-claude-mod
 In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `jpabich/live-progress-claude-mod`, then **Add plugin**.
 
 The mod needs a Claude Code recent enough to load hooks modules (it was built on 2.1.314). An older one installs it without error but shows no band; run `claude update`, then restart the session.
+
+### Options
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `clawd` (Clawd in the terminal) | on | Off: the CLI band draws each job as its progress bar and label alone, two rows a job, so it takes less room and more jobs fit. The desktop app always draws Clawd. |
+
+Set it in `/config` in a terminal session (the row **Clawd in the terminal** under live-progress), or on the options screen `/plugin install` shows.
 
 ## Develop
 

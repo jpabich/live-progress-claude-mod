@@ -195,6 +195,28 @@ test('the terminal band is drawn four times a second', async ($, on) => {
   await run
 })
 
+test('with the clawd option off, the terminal draws bars and labels alone, and more jobs fit', { options: { clawd: false } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on, { 'd7:Bash:one.sh': { ms: 600_000, at: 0 }, 'd7:Bash:two.sh': { ms: 600_000, at: 0 }, 'd7:Bash:three.sh': { ms: 600_000, at: 0 } })
+  on('tool.call', async () => {
+    await clock.sleep(60_000)
+    return { result: {}, text: 'ok' }
+  })
+  const runs = []
+  for (const name of ['one', 'two', 'three']) {
+    runs.push($.tool.call({ tool: 'Bash', command: `./${name}.sh` }))
+    await clock.advance(1_000)
+  }
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, maxRows: 12 } })  // one job with Clawd would fit here
+  expect(JSON.stringify(await ui.drawn())).not.toMatch(/[▀▄█]/)
+  for (const name of ['one', 'two', 'three']) expect(await ui.find({ type: 'Text', text: new RegExp(`${name}\\.sh`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /\d+% - \d+s - ETA/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /more/ })).toBeUndefined()
+  await ui.unmount()
+  await clock.advance(60_000)
+  await Promise.all(runs)
+})
+
 test('a quick job shows only once it has run a while, a known long one at once', () => {
   const job: Job = { id: 'j', kind: 'tool', label: 'x', key: 'k', startedAt: 0, expectedMs: null }
   expect(isShown(job, 500)).toBe(false)
