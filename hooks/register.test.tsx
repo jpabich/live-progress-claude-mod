@@ -217,6 +217,22 @@ test('with the clawd option off, the terminal draws bars and labels alone, and m
   await Promise.all(runs)
 })
 
+test('with the clawd option off, the desktop still draws Clawd', { options: { clawd: false } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on, { 'd7:Bash:build.sh': { ms: 600_000, at: 0 } })
+  on('tool.call', async () => {
+    await clock.sleep(60_000)
+    return { result: {}, text: 'ok' }
+  })
+  const run = $.tool.call({ tool: 'Bash', command: './build.sh' })
+  await clock.settle()
+  const desktop = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await desktop.find({ type: 'Svg' })).toBeDefined()
+  await desktop.unmount()
+  await clock.advance(60_000)
+  await run
+})
+
 test('a quick job shows only once it has run a while, a known long one at once', () => {
   const job: Job = { id: 'j', kind: 'tool', label: 'x', key: 'k', startedAt: 0, expectedMs: null }
   expect(isShown(job, 500)).toBe(false)
@@ -684,18 +700,24 @@ describe('what a run teaches and when a job goes', () => {
       await lost
     })
 
-    for (const isStopHeard of [false, true]) {
-      test(`a background job far past its usual time ${isStopHeard ? 'stays where a turn end lists it in flight' : 'goes where no turn end lists the work in flight'}`, async ($, on) => {
+    // two turns end each time: answered with no Stop (a managed plugin took it), answered with Stop, interrupted (which raises no Stop)
+    const cases = [
+      { name: 'goes where no turn end lists the work in flight', reason: 'answer', isStopHeard: false, stays: false },
+      { name: 'stays where a turn end lists it in flight', reason: 'answer', isStopHeard: true, stays: true },
+      { name: 'stays after turns that were interrupted, not answered', reason: 'aborted', isStopHeard: false, stays: true },
+    ] as const
+    for (const { name, reason, isStopHeard, stays } of cases) {
+      test(`a background job far past its usual time ${name}`, async ($, on) => {
         const { clock } = launch(on, { 'd7:Bash:quiet.sh': { ms: 10_000, at: 0 } })
         await $.tool.call({ tool: 'Bash', command: './quiet.sh', run_in_background: true })
         for (let turn = 0; turn < 2; turn++) {
-          await $.turn.complete(turnEnd)
+          await $.turn.complete({ ...turnEnd, reason, isAborted: reason === 'aborted' })
           if (isStopHeard) await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'bg-1', type: 'shell', status: 'running', description: '' }] })
         }
         await clock.advance(9 * 60_000)
         expect(await shows($, /quiet\.sh/)).toBe(true)  // the bound is 10 min, at least
         await clock.advance(2 * 60_000)
-        expect(await shows($, /quiet\.sh/)).toBe(isStopHeard)
+        expect(await shows($, /quiet\.sh/)).toBe(stays)
       })
     }
   })

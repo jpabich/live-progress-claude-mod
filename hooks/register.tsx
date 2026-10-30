@@ -407,16 +407,17 @@ const runsOf = (row: Cell[]): Array<Cell & { n: number }> => {
 // The functions `$` is handed to are top-level declarations (the engine follows `$` only into those).
 let tick: { cancel: () => void } | null = null
 let tickMs = 0
-let drawsCells = true  // whether the band last drew the terminal's Clawd in cells (redrawn each frame): not as pictures, nor bars alone
+let drawsClawd = true  // whether the band last drew the terminal's Clawd in cells (redrawn each frame): not as pictures, nor bars alone
 let shownSig = ''  // the jobs shown at the last tick: a change draws the band again
 const rechecked = new Set<string>()  // module state: empty again after each reload
 const learning = new Map<string, Promise<void>>()  // one learn at a time a key, so two runs ending together both count
 const asked = new Set<string>()  // jobs a permission dialog was put up for: the person's wait is no part of the run, which teaches nothing
 const ending = new Set<string>()  // jobs an event is ending: another telling of the same end (they may overlap) finds it taken
-// Whether `classic.Stop` reaches this mod: a plugin of a managed tier may take it past (`next.to`). Two main-loop turn ends without
-// it, and a background job past STUCK_AFTER its usual time (UNKNOWN_STUCK_MS with none) is taken to have ended unseen.
+// Whether `classic.Stop` reaches this mod: a plugin of a managed tier may take it past (`next.to`). Two main-loop turns answered
+// without it (an interrupted or failed turn raises no Stop, so it does not count), and a background job past STUCK_AFTER its usual
+// time (UNKNOWN_STUCK_MS with none) is taken to have ended unseen.
 let stopHeard = false
-let mainTurnsEnded = 0
+let answeredTurns = 0
 
 // Learned durations live under STORE, keyed by keyOf, each `{ ms, at }`: the typical duration and when it was last taught. A change
 // to what keyOf makes of a command takes a new prefix; session.start clears the old ones and, past MAX_KEYS, the least lately taught.
@@ -477,7 +478,7 @@ async function onTick($: EngineInterface): Promise<void> {
   const stale = (j: Job) => j.doneAt !== undefined && t - j.doneAt >= DONE_SHOW_MS
   if ((await read($, jobs)).some(stale)) await update($, jobs, all => all.filter(j => !stale(j)))  // (a write each tick redrew the band each tick)
   // where no turn's end lists the work in flight, a background job long past its usual time ended unseen, and goes
-  if (!stopHeard && mainTurnsEnded >= 2) await drop($, (await read($, jobs)).filter(j => isStuck(j, t)))
+  if (!stopHeard && answeredTurns >= 2) await drop($, (await read($, jobs)).filter(j => isStuck(j, t)))
   // a job begun before a (re)load has its estimate looked up again: a run may have taught it meanwhile (learnNow hands a new one to
   // the jobs of its kind still going)
   for (const j of await read($, jobs)) {
@@ -513,7 +514,7 @@ async function onTick($: EngineInterface): Promise<void> {
 // `session.start` (run again by a reload) calls this too.
 const IDLE_MS = 1000
 function ensureTick($: EngineInterface): void {
-  const ms = drawsCells ? FRAME_MS : IDLE_MS
+  const ms = drawsClawd ? FRAME_MS : IDLE_MS
   if (tick !== null && tickMs === ms) return
   tick?.cancel()
   tickMs = ms
@@ -724,14 +725,21 @@ export const register: Register = (on, options) => {
 
   // A plugin of a managed tier may take `session.append` and `classic.Stop` past this one (`next.to`), so ends are read from other
   // events too: a notification as it is delivered (`prompt.submit`), and a turn's end. A background subagent's ends its job, unless it
-  // waits on background work of its own and so runs on; any loop's end drops its calls that lost their end.
+  // waits on background work of its own and so runs on; any loop's end drops its calls that lost their end. A failure after `next`
+  // is the mod's alone: the turn's result stands, and nothing beneath runs again (as the `.catch` would make it).
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (e.agentId === undefined) mainTurnsEnded++
-    else if ((await $.agent.list().catch(() => [])).find(a => a.id === e.agentId)?.status !== 'waiting') {
-      await finishTask($, { id: e.agentId, succeeded: e.reason === 'answer' })
+    try {
+      if (e.agentId === undefined) {
+        if (e.reason === 'answer') answeredTurns++
+      } else if ((await read($, jobs)).some(j => j.kind === 'background' && j.id === e.agentId) &&
+        (await $.agent.list().catch(() => [])).find(a => a.id === e.agentId)?.status !== 'waiting') {
+        await finishTask($, { id: e.agentId, succeeded: e.reason === 'answer' })
+      }
+      await dropLost($, e.agentId)
+    } catch {
+      // the band may keep a job a moment longer; the next turn's end or the job's notification ends it
     }
-    await dropLost($, e.agentId)
     return r
   }).catch(($, e, next) => next(e))
 
@@ -748,7 +756,7 @@ export const register: Register = (on, options) => {
     // or the `clawd` option is off
     const room = e.props.maxRows - FRAME_ROWS
     const hasClawd = isPicture || (wantsClawd && room >= JOB_ROWS)
-    drawsCells = !isPicture && hasClawd  // without Clawd nothing moves between seconds: the clock ticks each IDLE_MS
+    drawsClawd = !isPicture && hasClawd  // without Clawd nothing moves between seconds: the clock ticks each IDLE_MS
     // the terminal redraws each tick by `now`; the desktop's picture animates itself, so it reads the clock without subscribing
     const t = isPicture ? await $.clock.now() : await read($, now)
     const visible = list.filter(j => isShown(j, t))
