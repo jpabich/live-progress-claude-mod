@@ -317,7 +317,12 @@ export const clawdSvg = (job: Job, t0: number): string => {
   const hopAt = (0.5 * e - elapsed) / 1000
   const hop = hopAt > 0 ? `<animateTransform attributeName="transform" type="translate" values="0 0;0 -${SPRITE_Y};0 0" dur="0.5s" begin="${hopAt}s"/>` : ''
   const w0 = `${Math.max(1, s0 * 100)}%`
-  const fill = rect(0, BAR_Y, left > 0 ? w0 : '100%', BAR_H, left <= 0 ? FILL_HEX.over : elapsed >= NEAR * e ? FILL_HEX.near : FILL_HEX.run, ' rx="4"',
+  // the bar grows by a CSS animation: in Chromium a SMIL one of a width in percents, sampled before the frame is laid out (as it is
+  // shown again after another session), draws no width at all until something else on the bar changes (its colour at NEAR), the
+  // bar grey under words that say 20%. The SMIL one stays under it, which the CSS one overrides, for a view without CSS widths.
+  const grow = left > 0 ? `<style>@keyframes grow{from{width:${w0}}to{width:100%}}</style>` : ''
+  const fill = grow + rect(0, BAR_Y, left > 0 ? w0 : '100%', BAR_H, left <= 0 ? FILL_HEX.over : elapsed >= NEAR * e ? FILL_HEX.near : FILL_HEX.run,
+    ` rx="4"${left > 0 ? ` style="animation:grow ${left}s linear forwards"` : ''}`,
     (left > 0 ? `<animate attributeName="width" from="${w0}" to="100%" dur="${left}s" fill="freeze"/>` : '') +
     (near > 0 ? `<set attributeName="fill" to="${FILL_HEX.near}" begin="${near}s"/>` : '') +
     (left > 0 ? `<set attributeName="fill" to="${FILL_HEX.over}" begin="${left}s"/>` : ''))

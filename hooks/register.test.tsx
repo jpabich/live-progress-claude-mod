@@ -1105,6 +1105,19 @@ test('the desktop picture stays under the Svg source limit', () => {
   }
 })
 
+test('the desktop bar grows by CSS from where the job is, over a SMIL width for a view without CSS widths', () => {
+  const job: Job = { id: 'j', kind: 'tool', label: 'x', key: 'k', startedAt: 1_700_000_000_000, expectedMs: 100_000 }
+  const svg = clawdSvg(job, job.startedAt + 20_000)
+  expect(svg).toContain('@keyframes grow{from{width:20%}to{width:100%}}')
+  expect(svg).toContain('width="20%" height="12" fill="#5aa55a" rx="4" style="animation:grow 80s linear forwards">' +
+    '<animate attributeName="width" from="20%" to="100%" dur="80s" fill="freeze"/>')
+  // past the usual end nothing grows: the bar is full and red
+  const over = clawdSvg(job, job.startedAt + 120_000)
+  expect(over).not.toContain('@keyframes')
+  expect(over).not.toContain('attributeName="width"')
+  expect(over).toContain('width="100%" height="12" fill="#d9534f" rx="4">')
+})
+
 test('the desktop picture counts a first run up', () => {
   const job: Job = { id: 'j', kind: 'tool', label: 'x', key: 'k', startedAt: 1_700_000_000_000, expectedMs: null }
   const said = (svg: string) => [...svg.matchAll(/>([^<>]*first run of its kind · no ETA yet)</g)].map(m => m[1])
