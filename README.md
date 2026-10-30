@@ -17,7 +17,9 @@ A Claude Code mod: a band above the prompt showing what is running right now (lo
 - Durations are learned per command kind (exponential average kept in the mod's store), so the second run of something gets an ETA. A kind is the script being run (by file name) or the program, with up to two subcommands (`manage.py migrate`, `npm run build`), plus the flags given, with their values when they name a mode or a place (`-Target web`, not `-OutName run7`). Each command of a chain counts, `cd`/`Set-Location` don't, and wrappers (`timeout`, `time`, `sudo`, `env`, `npx`, …) count by what they run: `./build.ps1 -Quick` and `./build.ps1 -Target web` learn apart, as do `npm ci` and `npm ci && npm run build`. Subagents learn by their type.
 - Only runs that succeed teach a duration: a failed, refused or killed run is dropped from the band without changing the ETA, and a run that waited on a permission dialog teaches nothing (your time on the dialog is not the run's).
 - Quick commands don't open the band: a job shows once it has run 2 s, or at once when its kind usually takes longer.
-- Background tasks (`run_in_background`, or a command you move to the background with Ctrl+B) end on their notification. At each turn's end, a task the engine no longer lists as in flight is dropped without teaching a duration, once the list is empty or names another of the band's tasks (so a list that names tasks some other way never drops one still running); a main-loop call still on the band then is dropped too.
+- Background tasks (`run_in_background`, or a command you move to the background with Ctrl+B) end on their notification, read both as the session stores it and as it is delivered to the model; a background subagent also ends with its turn, unless it is waiting on background work of its own. When several of these tell of one end, it counts once.
+- At each turn's end, a task the engine no longer lists as in flight is dropped without teaching a duration, once the list is empty or names another of the band's tasks (so a list that names tasks some other way never drops one still running). A call still on the band when its own loop's turn ends (the main conversation's or a subagent's) lost its end and is dropped too.
+- Where an administrator's managed plugin keeps those turn-end lists from the mod (you see `live-progress … hook was skipped` lines), a background job far past its usual time is taken to have ended unseen and dropped: past 3× its usual time and at least 10 min, or past 1 h on a first run.
 - Everything is drawn locally from engine events and a local clock: no model calls, no tokens.
 - **Hide** closes the band until your next prompt (a turn started by a background notification or a schedule leaves it hidden).
 
@@ -82,7 +84,7 @@ claude plugin test .
 | `.claude-plugin/plugin.json` | the mod's manifest |
 | `.claude-plugin/marketplace.json` | makes this repository an installable marketplace |
 | `hooks/hooks.json` | names the hooks module |
-| `hooks/register.tsx` | the hooks: `tool.call`, `classic.PermissionRequest`, `session.append`, `classic.Stop`, `ui.render` (AbovePrompt), `prompt.submit`, `session.start`, `session.attach`, `session.detach` |
+| `hooks/register.tsx` | the hooks: `tool.call`, `classic.PermissionRequest`, `session.append`, `classic.Stop`, `turn.complete`, `ui.render` (AbovePrompt), `prompt.submit`, `session.start`, `session.attach`, `session.detach` |
 | `hooks/register.test.tsx` | the tests (`claude plugin test .`) |
 | `types/index.d.ts` | the `$.state` contract (`jobs`, `now`, `isHidden`, `urgency`, `redraw`) |
 | `assets/` | the demo GIFs |
