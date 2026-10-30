@@ -25,18 +25,26 @@ Quick tools (`Read`, `Grep`, `Edit`, …), tools that wait on you (`AskUserQuest
 
 ## Install
 
-At the prompt of a terminal Claude Code session:
+No need to clone anything: Claude Code fetches the repository itself. At the prompt of a terminal Claude Code session, add this repository as a marketplace, then install the mod from it:
 
 ```
-/plugin install live-progress --marketplace jpabich/live-progress-claude-mod
+/plugin marketplace add jpabich/live-progress-claude-mod
 ```
 
-Answer `y` to add the marketplace, then pick a scope (user scope first).
+```
+/plugin install live-progress@live-progress-claude-mod
+```
+
+Pick a scope (user scope, so it loads in every session).
 
 From a shell:
 
 ```bash
-claude plugin install live-progress --marketplace jpabich/live-progress-claude-mod
+claude plugin marketplace add jpabich/live-progress-claude-mod
+```
+
+```bash
+claude plugin install live-progress@live-progress-claude-mod
 ```
 
 In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `jpabich/live-progress-claude-mod`, then **Add plugin**.
