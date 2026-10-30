@@ -2,7 +2,7 @@ import type { AgentStatus } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Job } from '../types'
-import { backgroundIdOf, clawdRows, clawdSvg, clockOf, isShown, isStuck, keyOf, progressOf, stoppedIdOf, taskEndsOf } from './register'
+import { backgroundIdOf, clawdRows, clawdSvg, clockOf, isListedAs, isShown, isStuck, keyOf, progressOf, stoppedIdOf, taskEndsOf } from './register'
 import type { Cell } from './register'
 
 const BAND = {
@@ -253,6 +253,19 @@ test('a background job is past its time far past its usual time, 4 h on a first 
   expect(isStuck(job({ expectedMs: 10_000 }), at + 11 * 60_000)).toBe(true)
   expect(isStuck(job({ expectedMs: 3_600_000 }), hours(2.9))).toBe(false)  // 3 × 1 h
   expect(isStuck(job({ kind: 'tool' }), hours(10))).toBe(false)
+})
+
+test("a turn-end list's command names a job's as it is, wrapped, or cut", () => {
+  expect(isListedAs('./a.sh -x', './a.sh -x')).toBe(true)
+  expect(isListedAs('./a.sh -x', './a.sh')).toBe(false)
+  expect(isListedAs('timeout 600 ./a.sh', './a.sh')).toBe(false)  // not wrapped unless asked
+  expect(isListedAs('timeout 600 ./a.sh', './a.sh', true)).toBe(true)
+  expect(isListedAs('timeout 600 ./a.sh -x', './a.sh', true)).toBe(false)
+  const long = `./a.sh ${'x'.repeat(1200)}`
+  const cut = (s: string) => `${s.slice(0, 1000)}... [+${s.length - 1000} chars]`
+  expect(isListedAs(cut(long), long)).toBe(true)
+  expect(isListedAs(cut(`timeout 600 ${long}`), long, true)).toBe(true)
+  expect(isListedAs(cut(`./b.sh ${'y'.repeat(1200)} short`), 'short', true)).toBe(false)  // a stray word names nothing
 })
 
 test('TaskStop names the task stopped by its result, else by the call', () => {
@@ -982,6 +995,63 @@ describe('what a run teaches and when a job goes', () => {
       await again
     })
 
+    test('a job whose own command a task names as it is takes it, before a job a wrapped listing would name', async ($, on) => {
+      const { clock } = quietLaunch(on)
+      await $.tool.call({ tool: 'Bash', command: './b.sh && ./a.sh', run_in_background: true })
+      await $.tool.call({ tool: 'Bash', command: './a.sh', run_in_background: true })
+      await clock.advance(6_000)
+      // a plugin beneath ran the second wrapped
+      await $.classic.Stop({ stop_hook_active: false, background_tasks: [shellTask('bg-1', './b.sh && ./a.sh'), shellTask('bg-2', 'timeout 600 ./a.sh')] })
+      await notify($, ['bg-1', 'completed'])
+      await clock.advance(4_000)
+      expect(await shows($, /b\.sh/)).toBe(false)
+      expect(await shows($, /Bash: \.\/a\.sh/)).toBe(true)
+      await notify($, ['bg-2', 'completed'])
+      await clock.advance(4_000)
+      expect(await shows($, /a\.sh/)).toBe(false)
+    })
+
+    test('a job the × took stays gone when its call moves to the background', async ($, on) => {
+      const clock = mock.clock(on, { now: 1_000_000 })
+      mock.store(on)
+      engineBand(on)
+      const calls: string[] = []
+      on('tool.call', async (_, e) => {
+        calls.push(e.tool_use_id)
+        await clock.sleep(10_000)
+        return { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg-9', backgroundedByUser: true }, text: 'moved to the background' }
+      })
+      const run = $.tool.call({ tool: 'Bash', command: './long.sh' })
+      await clock.advance(3_000)
+      const ui = await $.ui.mount(BAND)
+      await ui.press({ key: `drop:${calls[0]}` })
+      await ui.unmount()
+      await clock.advance(10_000)
+      await run
+      await clock.advance(1_000)
+      expect(await shows($, /long\.sh/)).toBe(false)
+    })
+
+    test('with the taskHooks option off, a subagent turn-end list ends nothing', { options: { taskHooks: false } }, async ($, on) => {
+      const { clock } = quietLaunch(on, {}, 'Command running in background with ID: bg-1')
+      await $.tool.call({ tool: 'Bash', command: './quiet.sh', run_in_background: true })
+      await clock.advance(6_000)
+      await $.classic.SubagentStop({ stop_hook_active: false, agent_id: 'a1', agent_transcript_path: '', agent_type: 'Explore', background_tasks: [] })
+      await clock.advance(11_000)
+      expect(await shows($, /quiet\.sh/)).toBe(true)
+    })
+
+    test('the status command says why a job past its time stays, and the commands an unread id is matched by', async ($, on) => {
+      const { clock } = quietLaunch(on, { 'd7:Bash:quiet.sh': { ms: 10_000, at: 0 } }, 'Command running in background with ID: bg-1')
+      await $.tool.call({ tool: 'Bash', command: './quiet.sh', run_in_background: true })
+      await clock.advance(6_000)
+      await $.classic.Stop({ stop_hook_active: false, background_tasks: [shellTask('bg-1', './quiet.sh')] })
+      await clock.advance(11 * 60_000)
+      const { text } = await $.command.run({ command: 'live-progress-status' })
+      expect(text).toMatch(/past the time bound, kept: the last turn-end list names it/)
+      expect(text).toContain('shell bg-1: running, command "./quiet.sh"')
+    })
+
     test('the status command tells the jobs, their ids and the last turn-end list', async ($, on) => {
       const { clock, calls } = quietLaunch(on, { 'd7:Bash:quiet.sh': { ms: 10_000, at: 0 } })
       await $.tool.call({ tool: 'Bash', command: './quiet.sh', run_in_background: true })
@@ -990,8 +1060,8 @@ describe('what a run teaches and when a job goes', () => {
       const { text } = await $.command.run({ command: 'live-progress-status' })
       expect(text).toMatch(/taskHooks on, band shown/)
       expect(text).toContain(`background ${calls[0]}: Bash: ./quiet.sh`)
-      expect(text).toMatch(/usually 10s, running/)
-      expect(text).toMatch(/Turn-end list \(0s ago\):\n {2}shell other: running/)
+      expect(text).toMatch(/usually 10s, running, id unread, command "\.\/quiet\.sh"/)
+      expect(text).toMatch(/Turn-end list \(0s ago\):\n {2}shell other: running, command "\.\/else\.sh"/)
     })
   })
 

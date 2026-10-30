@@ -438,7 +438,7 @@ const spawned = new Map<string, string>()  // an Agent call still running → th
 // list or two main-loop answered turns without one (an interrupted or failed turn raises no Stop, so it does not count).
 let hooksTasks = true
 let listed: Set<string> | null = null  // the ids the last `classic.Stop` listed in flight; null until one is heard
-let lastList: { at: number; tasks: Array<{ id: string; type: string; status: string }> } | null = null  // that list, for the status command
+let lastList: { at: number; tasks: Array<{ id: string; type: string; status: string; command?: string }> } | null = null  // that list, for the status command
 let answeredTurns = 0
 const unlisted = new Map<string, number>()  // a background job a turn's end no longer lists → when: it goes UNLISTED_GRACE_MS later
 function forgetLists(): void {
@@ -511,11 +511,8 @@ async function onTick($: EngineInterface): Promise<void> {
   if (late.length > 0) await drop($, late)
   // a background job long past its usual time ended unseen (no notification this mod could read), and goes, unless the last turn's
   // end listed it in flight
-  const known = hooksTasks ? listed : null
-  if (!hooksTasks || known !== null || answeredTurns >= 2) {
-    const stuck = (await read($, jobs)).filter(j => isStuck(j, t) && known?.has(j.id) !== true)
-    if (stuck.length > 0) await drop($, await notLive($, stuck))
-  }
+  const stuck = (await read($, jobs)).filter(j => isTimedOut(j, t))
+  if (stuck.length > 0) await drop($, await notLive($, stuck))
   // a job begun before a (re)load has its estimate looked up again: a run may have taught it meanwhile (learnNow hands a new one to
   // the jobs of its kind still going)
   for (const j of await read($, jobs)) {
@@ -567,12 +564,13 @@ async function start($: EngineInterface, job: Job): Promise<void> {
 }
 
 // A call that left a background task running becomes the task's job in one write, keeping its picture (its frame is not reloaded).
+// Only a job still on the band is handed on: one the person's × or the session's end took stays gone.
 async function handOff($: EngineInterface, from: string, job: Job): Promise<void> {
   rechecked.add(job.id)
   if (asked.delete(from)) asked.add(job.id)
   const kept = pictures.get(from)
   if (kept !== undefined) pictures.set(job.id, kept)
-  await update($, jobs, list => [...list.filter(j => j.id !== from && j.id !== job.id), job])
+  await update($, jobs, list => (list.some(j => j.id === from) ? [...list.filter(j => j.id !== from && j.id !== job.id), job] : list))
 }
 
 // A job's end: one that succeeded shows "done" a moment and teaches its duration, unless a permission dialog waited on the person;
@@ -656,6 +654,12 @@ export const isStuck = (j: Job, t: number): boolean =>
   j.kind === 'background' && j.doneAt === undefined &&
   t - j.startedAt > (j.expectedMs === null ? UNKNOWN_STUCK_MS : Math.max(STUCK_AFTER * j.expectedMs, MIN_STUCK_MS))
 
+// Whether the time bound holds now (with the option on, once a list or two answered turns without one were heard), and whether the
+// last turn-end list spares a job from it: the tick drops a job stuck and not spared, and the status command says which applies.
+const isBoundOn = (): boolean => !hooksTasks || listed !== null || answeredTurns >= 2
+const isSpared = (j: Job): boolean => hooksTasks && listed?.has(j.id) === true
+const isTimedOut = (j: Job, t: number): boolean => isBoundOn() && isStuck(j, t) && !isSpared(j)
+
 // The jobs of these that may go: all but the subagents the engine still lists as live.
 const LIVE = new Set(['pending', 'running', 'waiting'])
 async function notLive($: EngineInterface, gone: Job[]): Promise<Job[]> {
@@ -673,21 +677,33 @@ const commandOf = (listedAs: string): { text: string; isCut: boolean } => {
   const cut = /\.\.\. \[\+\d+ chars\]$/.exec(listedAs)
   return cut === null ? { text: listedAs, isCut: false } : { text: listedAs.slice(0, cut.index), isCut: true }
 }
+// Whether the engine's listing of a command names the job's command line: the same, or, `isWrapped`, with what a plugin beneath put
+// before it (`timeout 600 <command>`), the job's command starting after a space in the listing. A cut listing names a job whose
+// command starts with the part kept from there on, at least MIN_CUT_MATCH long so a stray word names nothing.
+const MIN_CUT_MATCH = 200
+export const isListedAs = (listing: string, command: string, isWrapped = false): boolean => {
+  const { text, isCut } = commandOf(listing)
+  const starts = isWrapped ? [...text.matchAll(/ /g)].map(m => (m.index as number) + 1) : [0]
+  return starts.some(p => {
+    const rest = text.slice(p)
+    return isCut ? rest.length >= Math.min(MIN_CUT_MATCH, command.length) && command.startsWith(rest) : rest === command
+  })
+}
+// Same commands first, then wrapped ones among the jobs and tasks left: a task one job's command names as it is is that job's.
 async function adopt($: EngineInterface, tasks: ReadonlyArray<TaskSummary>): Promise<void> {
   const list = await read($, jobs)
-  const unread = list.filter(j => j.kind === 'background' && j.doneAt === undefined && j.id === j.callId && j.command !== undefined)
-  if (unread.length === 0) return
+  let unread = list.filter(j => j.kind === 'background' && j.doneAt === undefined && j.id === j.callId && j.command !== undefined)
   const known = new Set(list.map(j => j.id))
-  const names = (k: TaskSummary, j: Job) => {
-    if (k.command === undefined || j.command === undefined) return false
-    const { text, isCut } = commandOf(k.command)
-    return isCut ? text.length > 0 && j.command.startsWith(text) : j.command === text
-  }
-  const shells = tasks.filter(k => k.type === 'shell' && !known.has(k.id))
-  for (const j of unread) {
-    const matches = shells.filter(k => names(k, j))
-    if (matches.length !== 1 || unread.filter(o => names(matches[0], o)).length !== 1) continue
-    await handOff($, j.id, { ...j, id: matches[0].id })
+  let shells = tasks.filter(k => k.type === 'shell' && k.command !== undefined && !known.has(k.id))
+  for (const isWrapped of [false, true]) {
+    const names = (k: TaskSummary, j: Job) => isListedAs(k.command as string, j.command as string, isWrapped)
+    for (const j of unread) {
+      const matches = shells.filter(k => names(k, j))
+      if (matches.length !== 1 || unread.filter(o => names(matches[0], o)).length !== 1) continue
+      await handOff($, j.id, { ...j, id: matches[0].id })
+      unread = unread.filter(o => o !== j)
+      shells = shells.filter(k => k !== matches[0])
+    }
   }
 }
 
@@ -699,7 +715,7 @@ async function adopt($: EngineInterface, tasks: ReadonlyArray<TaskSummary>): Pro
 // turn.complete.
 async function reconcile($: EngineInterface, tasks: ReadonlyArray<TaskSummary>): Promise<void> {
   const t = await $.clock.now()
-  lastList = { at: t, tasks: tasks.map(k => ({ id: k.id, type: k.type, status: k.status })) }
+  lastList = { at: t, tasks: tasks.map(k => ({ id: k.id, type: k.type, status: k.status, command: k.command })) }
   await adopt($, tasks)
   const live = new Set(tasks.map(k => k.id))
   listed = live
@@ -738,6 +754,8 @@ async function dismiss($: EngineInterface, key: string): Promise<void> {
   await drop($, (await read($, jobs)).filter(j => j.id === key || j.callId === key))
 }
 
+const clip = (s: string): string => JSON.stringify(s.length > 120 ? `${s.slice(0, 120)}…` : s)
+
 // What the band holds against what the engine lists, for the status command: why a job stays, or went.
 async function statusOf($: EngineInterface): Promise<string> {
   const t = await $.clock.now()
@@ -748,16 +766,20 @@ async function statusOf($: EngineInterface): Promise<string> {
   for (const j of list) {
     const state = j.doneAt !== undefined ? `done ${ago(j.doneAt)}`
       : unlisted.has(j.id) ? `unlisted ${ago(unlisted.get(j.id) as number)}, goes ${UNLISTED_GRACE_MS / 1000}s after`
-      : isStuck(j, t) ? 'past the time bound' : 'running'
+      : isTimedOut(j, t) ? 'past the time bound, goes'
+      : isStuck(j, t) ? `past the time bound, kept: ${isSpared(j) ? 'the last turn-end list names it' : 'no turn-end list or two answered turns yet'}`
+      : 'running'
     const ids = j.callId !== undefined && j.callId !== j.id ? `${j.id} (call ${j.callId})` : j.id
     const expected = j.expectedMs === null ? 'first run' : `usually ${Math.round(j.expectedMs / 1000)}s`
-    lines.push(`  ${j.kind} ${ids}: ${j.label}, started ${ago(j.startedAt)}, ${expected}, ${state}`)
+    // a job whose task id went unread, by the command line a turn-end list would name it by
+    const unread = j.kind === 'background' && j.id === j.callId && j.command !== undefined ? `, id unread, command ${clip(j.command)}` : ''
+    lines.push(`  ${j.kind} ${ids}: ${j.label}, started ${ago(j.startedAt)}, ${expected}, ${state}${unread}`)
   }
   const known = hooksTasks ? lastList : null
   if (known === null) lines.push(hooksTasks ? 'Turn-end list: none heard yet' : 'Turn-end list: not read (taskHooks off)')
   else {
     lines.push(`Turn-end list (${ago(known.at)}):${known.tasks.length === 0 ? ' empty' : ''}`)
-    for (const k of known.tasks) lines.push(`  ${k.type} ${k.id}: ${k.status}`)
+    for (const k of known.tasks) lines.push(`  ${k.type} ${k.id}: ${k.status}${k.command !== undefined ? `, command ${clip(k.command)}` : ''}`)
   }
   const agents = await $.agent.list().catch(() => [])
   if (agents.length > 0) {

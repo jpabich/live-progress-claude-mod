@@ -18,13 +18,13 @@ A Claude Code mod: a band above the prompt showing what is running right now (lo
 - Only runs that succeed teach a duration: a failed, refused or killed run is dropped from the band without changing the ETA, and a run that waited on a permission dialog teaches nothing (your time on the dialog is not the run's).
 - Quick commands don't open the band: a job shows once it has run 2 s, or at once when its kind usually takes longer.
 - Background tasks (`run_in_background`, or a command you move to the background with Ctrl+B) end on their notification, read both as the session stores it and as it is delivered to the model (also into a running turn). A background subagent ends with its own turn, unless it is waiting on background work of its own; a task Claude stops (`TaskStop`) goes at once. When several of these tell of one end, it counts once.
-- A call still on the band when its own loop's turn ends (the main conversation's or a subagent's) lost its end and is dropped. At each turn's end, the main conversation's or a subagent's, a task Claude Code no longer lists as in flight is dropped 10 s later without teaching a duration (its notification, if it comes meanwhile, still teaches), once the list is empty or names another of the band's tasks (so a list that names tasks some other way never drops one still running); a background subagent Claude Code still lists as running stays. A background command whose id the mod could not read from the call takes its task's id from that list, by its command line, when only one task and one job have it. A background command the last turn's end named stays; one it did not name, or any where no turn's end lists the work in flight (the `taskHooks` option off, or a managed plugin taking it past the mod), is dropped far past its usual time when it ends with no notification the mod can read, teaching nothing: past 3× its usual time and at least 10 min, or past 4 h on a first run. A background subagent past that time stays while Claude Code still lists it as running: a local one ends with its own turn, which always comes, and the mod knows it by the id its start gave; a remote one has no local turn, and goes by time once it is no longer listed.
+- A call still on the band when its own loop's turn ends (the main conversation's or a subagent's) lost its end and is dropped. At each turn's end, the main conversation's or a subagent's, a task Claude Code no longer lists as in flight is dropped 10 s later without teaching a duration (its notification, if it comes meanwhile, still teaches), once the list is empty or names another of the band's tasks (so a list that names tasks some other way never drops one still running); a background subagent Claude Code still lists as running stays. A background command whose id the mod could not read from the call takes its task's id from that list, by its command line (also one another plugin wrapped, as `timeout 600 <command>`), when only one task and one job have it. A background command the last turn's end named stays; one it did not name, or any where no turn's end lists the work in flight (the `taskHooks` option off, or a managed plugin taking it past the mod), is dropped far past its usual time when it ends with no notification the mod can read, teaching nothing: past 3× its usual time and at least 10 min, or past 4 h on a first run. A background subagent past that time stays while Claude Code still lists it as running: a local one ends with its own turn, which always comes, and the mod knows it by the id its start gave; a remote one has no local turn, and goes by time once it is no longer listed.
 - The `session.append`, `classic.Stop` and `classic.SubagentStop` hooks (the `taskHooks` option, on by default) can be turned off: a managed plugin an administrator installs may pass those events on past user plugins, and Claude Code then says in the transcript that the plugin's hook was skipped (`live-progress … hook was skipped` lines). Off, background commands end on their notification as delivered, a `TaskStop`, the ×, or far past their usual time.
 - Everything is drawn locally from engine events and a local clock: no model calls, no tokens.
 - **Hide** closes the band until your next prompt (a turn started by a background notification or a schedule leaves it hidden).
 - **×** before a job's label drops that job at once, teaching nothing: for one the mod still shows after it ended.
 - When the session ends (an exit, `/clear`), its jobs leave the band and a hidden band shows again for the next one.
-- `/live-progress-status` prints what the band holds (each job's ids, age, usual time and state), the last turn-end list of work in flight and the subagents Claude Code lists: why a job stays, or went. It runs at once, also during a turn.
+- `/live-progress-status` prints what the band holds (each job's ids, age, usual time and state, and why one past its usual time stays), the last turn-end list of work in flight with each command line, and the subagents Claude Code lists: why a job stays, or went. It runs at once, also during a turn.
 
 Quick tools (`Read`, `Grep`, `Edit`, …), tools that wait on you (`AskUserQuestion`, `ExitPlanMode`, `EnterPlanMode`) and MCP tools are not shown.
 
@@ -55,6 +55,22 @@ claude plugin install live-progress@live-progress-claude-mod
 In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `jpabich/live-progress-claude-mod`, then **Add plugin**.
 
 The mod needs a Claude Code recent enough to load hooks modules (it was built on 2.1.314). An older one installs it without error but shows no band; run `claude update`, then restart the session.
+
+### Update
+
+A new version comes in two steps: first refresh the marketplace, so Claude Code learns of the new version, then update the plugin itself. From a shell:
+
+```bash
+claude plugin marketplace update live-progress-claude-mod
+```
+
+```bash
+claude plugin update live-progress@live-progress-claude-mod
+```
+
+Add `--scope project` (or `local`) to the second if you installed the mod in that scope instead of user scope. The desktop app installs plugins in the same place (`~/.claude/plugins`), so these commands update its install too. In a terminal session, `/plugin` opens the same marketplace and plugin manager, if you'd rather update from there.
+
+The new version loads when a session starts: restart your Claude Code sessions, or start a new one in the desktop app.
 
 ### Options
 
