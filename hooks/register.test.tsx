@@ -109,8 +109,8 @@ test('progressOf moves from run to near to over', () => {
   const job: Job = { id: 'j', kind: 'tool', label: 'x', key: 'k', startedAt: 0, expectedMs: 100_000 }
   expect(progressOf(job, 50_000)).toMatchObject({ mood: 'run', share: 0.5 })
   expect(progressOf(job, 90_000).mood).toBe('near')
-  expect(progressOf(job, 120_000)).toMatchObject({ mood: 'over', words: '2m - 20s over the usual 1m' })
-  expect(progressOf({ ...job, expectedMs: null }, 3_000).mood).toBe('sleep')
+  expect(progressOf(job, 120_000)).toMatchObject({ mood: 'over', words: '2m · 20s over the usual 1m' })
+  expect(progressOf({ ...job, expectedMs: null }, 3_000)).toMatchObject({ mood: 'sleep', words: '3s · first run of its kind · no ETA yet' })
   expect(progressOf({ ...job, doneAt: 7_000 }, 9_000)).toMatchObject({ mood: 'done', words: 'done in 7s' })
 })
 
@@ -207,7 +207,7 @@ test('with the clawd option off, the terminal draws bars and labels alone, and m
   const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, maxRows: 12 } })  // one job with Clawd would fit here
   expect(JSON.stringify(await ui.drawn())).not.toMatch(/[▀▄█]/)
   for (const name of ['one', 'two', 'three']) expect(await ui.find({ type: 'Text', text: new RegExp(`${name}\\.sh`) })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /\d+% - \d+s - ETA/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /\d+% · \d+s · ETA/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /more/ })).toBeUndefined()
   await ui.unmount()
   await clock.advance(60_000)
@@ -458,21 +458,21 @@ test('a client attaching or leaving gets its pictures made anew', async ($, on) 
   // the words the picture starts with: where the job stood when the picture was made
   const startsAt = async () => {
     const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-    const said = /\d+% - \d+s/.exec(JSON.stringify(await ui.drawn()))?.[0]
+    const said = /\d+% · \d+s/.exec(JSON.stringify(await ui.drawn()))?.[0]
     await ui.unmount()
     return said
   }
 
   const run = $.tool.call({ tool: 'Bash', command: './build.sh' })
   await clock.settle()
-  expect(await startsAt()).toBe('0% - 0s')
+  expect(await startsAt()).toBe('0% · 0s')
   await clock.advance(30_000)
-  expect(await startsAt()).toBe('0% - 0s')  // kept: a new source would reload the frame
+  expect(await startsAt()).toBe('0% · 0s')  // kept: a new source would reload the frame
   await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
-  expect(await startsAt()).toBe('5% - 30s')
+  expect(await startsAt()).toBe('5% · 30s')
   await clock.advance(10_000)
   await $.session.detach({ surface: 'desktop', clientId: 'desktop:default', reason: 'detach' })
-  expect(await startsAt()).toBe('6% - 40s')
+  expect(await startsAt()).toBe('6% · 40s')
   await clock.advance(20_000)
   await run
 })
@@ -781,6 +781,24 @@ test('the desktop picture stays under the Svg source limit', () => {
       expect(clawdSvg(job, job.startedAt + share * e).length).toBeLessThanOrEqual(131_072)
     }
   }
+  const first: Job = { id: 'j', kind: 'tool', label: 'x', key: 'k', startedAt: 1_700_000_000_000, expectedMs: null }
+  for (const minutes of [0, 0.5, 1, 60, 239, 240, 300]) {
+    expect(clawdSvg(first, first.startedAt + minutes * 60_000).length).toBeLessThanOrEqual(131_072)
+  }
+})
+
+test('the desktop picture counts a first run up', () => {
+  const job: Job = { id: 'j', kind: 'tool', label: 'x', key: 'k', startedAt: 1_700_000_000_000, expectedMs: null }
+  const said = (svg: string) => [...svg.matchAll(/>([^<>]*first run of its kind · no ETA yet)</g)].map(m => m[1])
+  const early = said(clawdSvg(job, job.startedAt + 58_500))
+  expect(early.slice(0, 4)).toEqual(['58s · first run of its kind · no ETA yet', '59s · first run of its kind · no ETA yet',
+    '1m · first run of its kind · no ETA yet', '2m · first run of its kind · no ETA yet'])
+  // past the 4 h a first run may be dropped by, a subagent still running stays: the count goes on
+  expect(early.at(-1)).toBe('8h18m · first run of its kind · no ETA yet')
+  const late = said(clawdSvg(job, job.startedAt + 300 * 60_000))
+  expect([late[0], late[1]]).toEqual(['5h00m · first run of its kind · no ETA yet', '5h01m · first run of its kind · no ETA yet'])
+  // each second once, from a drawing between whole seconds
+  expect(said(clawdSvg(job, job.startedAt + 1_234)).slice(0, 4).map(s => s.split(' ')[0])).toEqual(['1s', '2s', '3s', '4s'])
 })
 
 test('a typed prompt shows the hidden band again', async ($, on) => {

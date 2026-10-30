@@ -136,12 +136,12 @@ export const progressOf = (job: Job, t: number): Look => {
   if (job.expectedMs === null || job.expectedMs <= 0) {
     // no estimate yet: the bar sweeps
     const at = Math.floor(elapsed / 1000) % BAR_STEPS
-    return { words: `${clockOf(elapsed)} - first run of its kind: no ETA yet`, mood: 'sleep', share: at / BAR_STEPS }
+    return { words: `${clockOf(elapsed)} · first run of its kind · no ETA yet`, mood: 'sleep', share: at / BAR_STEPS }
   }
   const share = elapsed / job.expectedMs
   const left = job.expectedMs - elapsed
-  if (left <= 0) return { words: `${clockOf(elapsed)} - ${clockOf(-left)} over the usual ${clockOf(job.expectedMs)}`, mood: 'over', share: 1 }
-  return { words: `${Math.floor(share * 100)}% - ${clockOf(elapsed)} - ETA ${clockOf(left, true)}`, mood: share > NEAR ? 'near' : 'run', share }
+  if (left <= 0) return { words: `${clockOf(elapsed)} · ${clockOf(-left)} over the usual ${clockOf(job.expectedMs)}`, mood: 'over', share: 1 }
+  return { words: `${Math.floor(share * 100)}% · ${clockOf(elapsed)} · ETA ${clockOf(left, true)}`, mood: share > NEAR ? 'near' : 'run', share }
 }
 
 // Whether a job is worth showing: a quick command comes and goes without opening the band.
@@ -257,6 +257,35 @@ const placed = (share: number, inner: string, to?: number, dur?: number): string
     `${inner}</g></svg>`
 }
 
+// A picture's words as they change: each text shown from `at` (seconds from the drawing) to the next one's.
+type Words = Array<{ at: number; said: string; colour: string }>
+
+// A job's next whole `step` (ms) after `ms` into it. In whole milliseconds: float error never brings a step back a hair after itself.
+const nextWhole = (ms: number, step: number): number => (Math.floor(Math.round(ms) / step) + 1) * step
+
+// The words of a picture drawn `elapsed` ms into its job: what `say` says at each time `next` gives after the one before, up to
+// MAX_WORDS texts, the last one once `isLast`.
+const wordsFrom = (elapsed: number, say: (ms: number) => Omit<Words[number], 'at'>, next: (ms: number) => number,
+  isLast: (ms: number) => boolean = () => false): Words => {
+  const steps: Words = []
+  for (let ms = elapsed; steps.length < MAX_WORDS; ms = next(ms)) {
+    steps.push({ at: (ms - elapsed) / 1000, ...say(ms) })
+    if (isLast(ms)) break
+  }
+  return steps
+}
+
+// The texts share their font in one group, each one only its words, colour and times (a few hundred of them).
+const wordsOf = (steps: Words): string => {
+  const r = (v: number) => Math.round(v * 100) / 100
+  const words = steps.map((st, i) => {
+    const show = i === 0 ? '' : `<set attributeName="visibility" to="visible" begin="${r(st.at)}s"/>`
+    const hide = i < steps.length - 1 ? `<set attributeName="visibility" to="hidden" begin="${r(steps[i + 1].at)}s"/>` : ''
+    return `<text x="0" y="${CLAWD_H - 6}" fill="${st.colour}"${i === 0 ? '' : ' visibility="hidden"'}>${st.said}${show}${hide}</text>`
+  })
+  return `<g font-size="14" font-weight="600" font-family="system-ui, sans-serif">${words.join('')}</g>`
+}
+
 // The picture for `job` as it stands at `t0` (ms), animated from there on by itself.
 export const clawdSvg = (job: Job, t0: number): string => {
   const open = `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="${CLAWD_H}">`
@@ -271,8 +300,11 @@ export const clawdSvg = (job: Job, t0: number): string => {
   if (e === null || e <= 0) {
     const z = `<text x="${SPRITE_W + 4}" y="2" font-size="13" font-family="monospace" fill="${FILL_HEX.sleep}">z<animate attributeName="opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite"/></text>`
     const sweep = rect(0, BAR_Y, '8%', BAR_H, FILL_HEX.sleep, ' rx="4"', '<animate attributeName="x" values="0%;92%;0%" dur="4s" repeatCount="indefinite"/>')
-    return open + placed(0, `${STAND}${z}`) + track + sweep +
-      text('first run of its kind: no ETA yet', FILL_HEX.sleep) + '</svg>'
+    // the time so far, a text a second in the first minute, then a minute, as long as a job may stay (a subagent still running
+    // stays past UNKNOWN_STUCK_MS)
+    const steps = wordsFrom(elapsed, ms => ({ said: `${clockOf(ms)} · first run of its kind · no ETA yet`, colour: FILL_HEX.sleep }),
+      ms => nextWhole(ms, ms < 60e3 ? 1000 : 60e3))
+    return open + placed(0, `${STAND}${z}`) + track + sweep + wordsOf(steps) + '</svg>'
   }
   const left = Math.max(0, (e - elapsed) / 1000)  // seconds to the usual end, from the drawing
   const s0 = Math.min(1, elapsed / e)
@@ -290,35 +322,19 @@ export const clawdSvg = (job: Job, t0: number): string => {
     (left > 0 ? `<set attributeName="fill" to="${FILL_HEX.over}" begin="${left}s"/>` : ''))
   // the words, one text a step (a second while the times are in seconds, then a minute, or a few in a job of many hours; the first
   // until the next whole step of the job), each shown from its start to the next one's
-  const slow = 60 * Math.max(1, Math.ceil(e / 60e3 / SLOW_WORDS))
-  const steps: Array<{ at: number; said: string; colour: string }> = []
-  let at = 0  // seconds from the drawing
-  for (let i = 0; i < MAX_WORDS; i++) {
-    const ms = elapsed + at * 1000
-    const over = ms - e
-    steps.push({
-      at,
-      colour: over >= 0 ? FILL_HEX.over : ms >= NEAR * e ? FILL_HEX.near : FILL_HEX.run,
-      said: over >= 0 ? `${clockOf(ms)} - ${clockOf(over)} over the usual ${clockOf(e)}`
-        : `${pct(ms / e)} - ${clockOf(ms)} - ETA ${clockOf(e - ms, true)} - ends ${hhmm(job.startedAt + e)}`,
-    })
-    // (seconds only in a job's first minute and in short jobs: a second a text all through a long one would outgrow the picture)
-    const step = ms < 60e3 || e < 180e3 ? 1 : slow
-    const next = at + step - (ms / 1000) % step
-    const end = (e - elapsed) / 1000  // the usual end gets a text of its own: "over" starts there, not at the next step
-    at = at < end && next > end ? end : next
+  const slow = 60e3 * Math.max(1, Math.ceil(e / 60e3 / SLOW_WORDS))
+  // (seconds only in a job's first minute and in short jobs: a second a text all through a long one would outgrow the picture)
+  const stepOf = (ms: number) => ms < 60e3 || e < 180e3 ? 1000 : slow
+  const steps = wordsFrom(elapsed,
+    ms => ms >= e
+      ? { said: `${clockOf(ms)} · ${clockOf(ms - e)} over the usual ${clockOf(e)}`, colour: FILL_HEX.over }
+      : { said: `${pct(ms / e)} · ${clockOf(ms)} · ETA ${clockOf(e - ms, true)} · ends ${hhmm(job.startedAt + e)}`,
+          colour: ms >= NEAR * e ? FILL_HEX.near : FILL_HEX.run },
+    // the usual end gets a text of its own: "over" starts there, not at the next step
+    ms => { const next = nextWhole(ms, stepOf(ms)); return ms < e && next > e ? e : next },
     // an hour past the usual end, or two minutes past it in seconds: the last words stay (the picture's source is held to 128 KB)
-    if (over > 3600e3 || (step === 1 && over > 120e3)) break
-  }
-  // the texts share their font in one group, each one only its words, colour and times (a few hundred of them)
-  const r = (v: number) => Math.round(v * 100) / 100
-  const words = steps.map((st, i) => {
-    const show = i === 0 ? '' : `<set attributeName="visibility" to="visible" begin="${r(st.at)}s"/>`
-    const hide = i < steps.length - 1 ? `<set attributeName="visibility" to="hidden" begin="${r(steps[i + 1].at)}s"/>` : ''
-    return `<text x="0" y="${CLAWD_H - 6}" fill="${st.colour}"${i === 0 ? '' : ' visibility="hidden"'}>${st.said}${show}${hide}</text>`
-  })
-  return open + placed(s0, `<g>${hop}${DUST}${orange}${red}</g>`, 1, left) + track + fill +
-    `<g font-size="14" font-weight="600" font-family="system-ui, sans-serif">${words.join('')}</g></svg>`
+    ms => ms - e > 3600e3 || (stepOf(ms) === 1000 && ms - e > 120e3))
+  return open + placed(s0, `<g>${hop}${DUST}${orange}${red}</g>`, 1, left) + track + fill + wordsOf(steps) + '</svg>'
 }
 
 // A picture animates from the moment its frame loads, as from the time it was made: a frame loaded again later (the desktop showing
@@ -802,7 +818,7 @@ export const register: Register = (on, options) => {
                     : <Box width={`${Math.max(1, Math.round(p.share * 100))}%`} backgroundColor={FILL_HEX[p.mood]}><Text> </Text></Box>}
                 </Box>
                 <Text> </Text>
-                <Text bold color={FILL_HEX[p.mood]}>{p.words}{p.mood === 'run' || p.mood === 'near' ? ` - ends ${hhmm(job.startedAt + (job.expectedMs as number))}` : ''}</Text>
+                <Text bold color={FILL_HEX[p.mood]}>{p.words}{p.mood === 'run' || p.mood === 'near' ? ` · ends ${hhmm(job.startedAt + (job.expectedMs as number))}` : ''}</Text>
               </Box>
               <Text dimColor>{job.label}</Text>
             </Box>
