@@ -1,13 +1,19 @@
 # live-progress
 
-![live-progress demo](assets/demo.gif)
+A Claude Code mod: a band above the prompt showing what is running right now (long tool calls, background builds and tests, subagents), each with a progress bar that fills by the job's learned typical duration (ETA).
+
+#### In the desktop app
+
+![live-progress in the desktop app](assets/demo.gif)
+
+#### In the CLI
 
 ![live-progress in a terminal](assets/demo-cli.gif)
 
-A Claude Code mod: a band above the prompt showing what is running right now (long tool calls, background builds and tests, subagents), each with a progress bar that fills by the job's learned typical duration (ETA).
-
-- On the desktop app, Clawd walks along an animated SVG bar, sweats when a job runs past its usual time and jumps with confetti when it finishes.
-- In a terminal, the same Clawd in half-block characters (11 cells by 3 rows under a row of air for his hops, redrawn four times a second) walks, hops, sweats, dozes and jumps over a cell-laid bar with `% - elapsed - ETA - ends HH:MM`.
+- In the desktop app, Clawd walks along an animated SVG bar, kicking up dust: he hops half way, the bar turns yellow near the usual end, and past it he goes red and sweats. A first run of its kind, with no ETA yet, has him dozing while a bar sweeps; when a job ends he jumps with confetti.
+- In the CLI, the same Clawd in half-block characters (11 cells by 3 rows under a row of air for his hops, redrawn four times a second) does the same over a cell-laid bar with `% - elapsed - ETA - ends HH:MM`.
+- The band's frame shows the most urgent job: green, yellow near the usual end, red past it, cyan while no job has an ETA.
+- Up to four jobs show at once, the latest ones, with `+N more` for the rest; a finished job stays 3 s with its `done in` time.
 - Durations are learned per command kind (exponential average kept in the mod's store), so the second run of something gets an ETA. A kind is the script being run (by file name), or the program and up to two subcommands, plus the flags given, with their values when they name a mode or a place (`-Target web`, not `-OutName run7`). Each command of a chain counts, `cd`/`Set-Location` don't: `./build.ps1 -Quick` and `./build.ps1 -Target web` learn apart, as do `npm ci` and `npm ci && npm run build`. Subagents learn by their type.
 - Only runs that succeed teach a duration: a failed, refused or killed run is dropped from the band without changing the ETA.
 - Quick commands don't open the band: a job shows once it has run 2 s, or at once when its kind usually takes longer.
@@ -60,5 +66,7 @@ claude plugin test .
 | `.claude-plugin/plugin.json` | the mod's manifest |
 | `.claude-plugin/marketplace.json` | makes this repository an installable marketplace |
 | `hooks/hooks.json` | names the hooks module |
-| `hooks/register.tsx` | the hooks: `tool.call`, `session.append`, `ui.render` (AbovePrompt), `prompt.submit`, `session.start` |
-| `types/index.d.ts` | the `$.state` contract (`jobs`, `now`, `isHidden`, `urgency`) |
+| `hooks/register.tsx` | the hooks: `tool.call`, `session.append`, `classic.Stop`, `ui.render` (AbovePrompt), `prompt.submit`, `session.start`, `session.attach`, `session.detach` |
+| `hooks/register.test.tsx` | the tests (`claude plugin test .`) |
+| `types/index.d.ts` | the `$.state` contract (`jobs`, `now`, `isHidden`, `urgency`, `redraw`) |
+| `assets/` | the demo GIFs |
