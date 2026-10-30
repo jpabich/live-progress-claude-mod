@@ -157,18 +157,29 @@ const body = (colour: string): string =>
       // every 20 s he looks round: the eyes back, then ahead, then home
       `<animate attributeName="x" values="${x * PX};${x * PX};${x * PX - 1.5};${x * PX - 1.5};${x * PX + 1.5};${x * PX + 1.5};${x * PX}" keyTimes="0;0.88;0.9;0.93;0.95;0.98;1" dur="20s" repeatCount="indefinite" calcMode="discrete"/>`))).join('')
 
-// Dust puffs behind his feet as he walks (to the right: the puffs drift left and up and fade).
-const DUST = [0, 1, 2].map(i =>
-  `<circle cx="0" cy="${5 * PX}" r="1.6" fill="#b8ad9e" opacity="0">` +
-  `<animate attributeName="cx" values="${2 * PX};${2 * PX - 9}" dur="0.9s" begin="${i * 0.3}s" repeatCount="indefinite"/>` +
-  `<animate attributeName="cy" values="${5 * PX};${5 * PX - 5}" dur="0.9s" begin="${i * 0.3}s" repeatCount="indefinite"/>` +
-  `<animate attributeName="opacity" values="0.8;0" dur="0.9s" begin="${i * 0.3}s" repeatCount="indefinite"/></circle>`).join('')
+// Dust kicked up as he walks (to the right): a puff at each footfall, twice a walk cycle, from behind his back feet (the two back
+// legs in turn). Each puff is a little cloud of two circles that swells as it drifts back and up, and fades.
+const DUST_S = STEP_S * 2  // a puff's life: four puffs alive at once, one a footfall
+const DUST = '<defs><filter id="dust" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="0.7"/></filter></defs>' +
+  '<g filter="url(#dust)" shape-rendering="auto">' + [0, 1, 2, 3].map(i => {
+    const x = (i % 2 === 0 ? 2 : 3) * PX  // at the back foot
+    const y = 5 * PX + 0.5  // on the ground under his feet
+    const timing = `dur="${DUST_S}s" begin="${(i * STEP_S / 2).toFixed(2)}s" repeatCount="indefinite"`
+    const cloud = ([dx, dy, k]: number[]) =>
+      `<circle cx="${x + dx}" cy="${y + dy}" r="0" fill="#e2d8ca" opacity="0">` +
+      `<animate attributeName="cx" values="${x + dx};${x + dx - 9 * k};${x + dx - 15 * k}" keyTimes="0;0.4;1" ${timing}/>` +
+      `<animate attributeName="cy" values="${y + dy};${y + dy - 3};${y + dy - 6}" keyTimes="0;0.4;1" ${timing}/>` +
+      `<animate attributeName="r" values="${1.2 * k};${3 * k};${4.4 * k}" keyTimes="0;0.4;1" ${timing}/>` +
+      `<animate attributeName="opacity" values="0;0.6;0.35;0" keyTimes="0;0.1;0.5;1" ${timing}/></circle>`
+    return [[0, 0, 1], [-2.5, -1.5, 0.7]].map(cloud).join('')
+  }).join('') + '</g>'
 
-// Sweat past the usual time: two drops by his head, falling and fading, again and again.
-const SWEAT = [[-3, 0], [SPRITE_W + 1, 0.45]].map(([x, d]) =>
-  `<ellipse cx="${x}" cy="0" rx="1.4" ry="2.2" fill="#7fc4ff" opacity="0">` +
-  `<animate attributeName="cy" values="0;9" dur="0.9s" begin="${d}s" repeatCount="indefinite"/>` +
-  `<animate attributeName="opacity" values="1;0" dur="0.9s" begin="${d}s" repeatCount="indefinite"/></ellipse>`).join('')
+// Sweat past the usual time: two drops on him, one at each side of his head (the head's outer columns, 2 and 8), each beading at the
+// top, then running down him to his widest row and fading there, again and again.
+const SWEAT = [[2.5 * PX, 0], [8.5 * PX, 0.55]].map(([x, d]) =>
+  `<ellipse cx="${x}" cy="${0.6 * PX}" rx="1.6" ry="2.3" fill="#8fd0ff" opacity="0">` +
+  `<animate attributeName="cy" values="${0.6 * PX};${0.6 * PX};${2.6 * PX}" keyTimes="0;0.3;1" dur="1.1s" begin="${d}s" repeatCount="indefinite"/>` +
+  `<animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.25;0.8;1" dur="1.1s" begin="${d}s" repeatCount="indefinite"/></ellipse>`).join('')
 
 // Confetti over him at the finish: little squares of colour falling and turning.
 const CONFETTI = ['#ffd23f', '#5aa55a', '#7fc4ff', '#ff8cc6', '#D97757', '#b48cff', '#ffd23f', '#5aa55a'].map((c, i) => {
