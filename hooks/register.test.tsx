@@ -1,7 +1,8 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Job } from '../types'
-import { backgroundIdOf, clockOf, isShown, keyOf, progressOf, taskEndsOf } from './register'
+import { backgroundIdOf, clawdRows, clockOf, isShown, keyOf, progressOf, taskEndsOf } from './register'
+import type { Cell } from './register'
 
 const BAND = {
   plugin: 'live-progress',
@@ -82,6 +83,84 @@ test('progressOf moves from run to near to over', () => {
   expect(progressOf(job, 120_000)).toMatchObject({ mood: 'over', words: '2m - 20s over the usual 1m' })
   expect(progressOf({ ...job, expectedMs: null }, 3_000).mood).toBe('sleep')
   expect(progressOf({ ...job, doneAt: 7_000 }, 9_000)).toMatchObject({ mood: 'done', words: 'done in 7s' })
+})
+
+describe('the terminal Clawd', () => {
+  const job = (more: Partial<Job> = {}): Job => ({ id: 'j', kind: 'tool', label: 'x', key: 'k', startedAt: 0, expectedMs: 20_000, ...more })
+  const EYE = '#1f1e1d'
+  // where his eyes are: the cells with the eye colour, above or below
+  const eyesOf = (rows: Cell[][]) => rows.flatMap(r => r.flatMap((c, x) => (c.fg === EYE || c.bg === EYE ? [x] : [])))
+  const colours = (rows: Cell[][]) => new Set(rows.flat().flatMap(c => [c.fg, c.bg]).filter(Boolean))
+  const top = (rows: Cell[][]) => rows[0].map(c => c.ch).join('')
+
+  test('he is four rows over the whole bar, with two eyes', () => {
+    const rows = clawdRows(job(), 4_000)
+    expect(rows.length).toBe(4)
+    for (const r of rows) expect(r.length).toBe(32)
+    expect(eyesOf(rows).length).toBe(2)
+  })
+
+  test('he stands over the end of the filled part', () => {
+    expect(eyesOf(clawdRows(job(), 0))).toEqual([3, 7])
+    expect(eyesOf(clawdRows(job(), 8_000))).toEqual([3 + 8, 7 + 8])  // 0.4 of the 21 cells he walks
+  })
+
+  test('his legs step four times a second', () => {
+    const feet = (t: number) => clawdRows(job({ expectedMs: 600_000 }), t)[3].map(c => c.ch).join('')  // long: he stays on his cell
+    expect(feet(4_000)).not.toBe(feet(4_500))
+    expect(feet(4_000)).toBe(feet(5_000))
+  })
+
+  test('he hops half way', () => {
+    for (const t of [9_000, 9_250, 9_500, 9_750]) expect(top(clawdRows(job(), t))).not.toMatch(/[▀█]/)
+    expect(top(clawdRows(job(), 10_100))).toMatch(/[▀█]/)
+  })
+
+  test('past the usual time he is red and sweats at the end of the bar', () => {
+    const rows = clawdRows(job(), 25_000)
+    expect(eyesOf(rows)).toEqual([24, 28])
+    expect(colours(rows)).toContain('#d9534f')
+    expect(colours(rows)).toContain('#8fd0ff')
+    expect(colours(rows)).not.toContain('#D97757')
+  })
+
+  test('on a first run he dozes at the start with a blinking z', () => {
+    const asleep = (t: number) => clawdRows(job({ expectedMs: null }), t)
+    expect(eyesOf(asleep(3_000))).toEqual([3, 7])
+    expect(asleep(4_000).flat().some(c => c.ch === 'z')).toBe(true)
+    expect(asleep(5_000).flat().some(c => c.ch === 'z')).toBe(false)
+  })
+
+  test('done, he jumps at the end of the bar under confetti', () => {
+    const done = (t: number) => clawdRows(job({ doneAt: 20_000 }), t)
+    expect(new Set([0, 250, 500, 750].map(dt => eyesOf(done(20_000 + dt))[0]))).toEqual(new Set([24]))
+    expect(new Set([0, 250, 500, 750].map(dt => top(done(20_000 + dt))))).not.toEqual(new Set([top(done(20_000))]))
+    expect([...colours(done(20_500))].filter(c => !['#D97757', EYE].includes(c as string)).length).toBeGreaterThanOrEqual(3)
+  })
+
+  test('dust kicks up behind him as he walks', () => {
+    expect([0, 250, 500, 750].some(dt => clawdRows(job(), 4_000 + dt).flat().some(c => c.ch === '░'))).toBe(true)
+    expect(clawdRows(job({ expectedMs: null }), 4_000).flat().some(c => c.ch === '░')).toBe(false)
+  })
+})
+
+test('the terminal band is drawn four times a second', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on, { 'd5:Bash:build.sh': 60_000 })
+  on('tool.call', async () => {
+    await clock.sleep(10_000)
+    return { result: {}, text: 'ok' }
+  })
+
+  const run = $.tool.call({ tool: 'Bash', command: './build.sh' })
+  await clock.advance(3_000)
+  const ui = await $.ui.mount(BAND)
+  const before = JSON.stringify(await ui.drawn())
+  await clock.advance(250)
+  expect(JSON.stringify(await ui.drawn())).not.toBe(before)
+  await ui.unmount()
+  await clock.advance(7_000)
+  await run
 })
 
 test('a quick job shows only once it has run a while, a known long one at once', () => {

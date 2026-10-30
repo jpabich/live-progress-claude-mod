@@ -4,7 +4,7 @@ import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 import type { Job } from '../types'
 
 // A band above the prompt: what runs now, each with a bar that fills by its learned typical duration (ETA). Everything is drawn
-// here from the engine's events and a one-second local clock: no model call, so no tokens.
+// here from the engine's events and a local clock: no model call, so no tokens.
 
 const jobs = atom({ plugin: 'live-progress', key: 'jobs' } as const, [] as Job[])
 const now = atom({ plugin: 'live-progress', key: 'now' } as const, 0)
@@ -122,7 +122,7 @@ const MOOD_COLOUR: Record<Look['mood'], string> = { run: 'green', near: 'yellow'
 
 // Clawd, animated, the band's full width. On the desktop one SVG a job: SMIL moves Clawd and the bar from where the job is at the
 // drawing to the end of its usual time, switches the words, turns him red past the usual time, and walks his legs in a four-step
-// cycle. In a terminal, which draws no SVG, a one-row Clawd of blocks.
+// cycle. In a terminal, which draws no SVG, the same sprite in half-block cells (clawdRows).
 const CLAWD_H = 70  // the picture's height, CSS pixels; it is as wide as the band (the bar and Clawd's way in percents)
 const PX = 4  // a sprite pixel
 const SPRITE_W = 11 * PX
@@ -307,9 +307,70 @@ const pictureOf = (job: Job, t: number): string => {
   return svg
 }
 
-// The terminal's Clawd: one row of blocks, his legs swapping each second.
-const CLAWD_TEXT = ['▐▛█▜▌', '▝▜█▛▘']
-const CLAWD_CELLS = 5
+// The terminal's Clawd: the desktop's sprite pixel for pixel, a pixel a cell wide and half a cell tall (▀ or ▄, a colour over
+// another), in four rows the bar's width, the top one the air he hops into. A frame each FRAME_MS: his walk's four steps a second.
+export type Cell = { ch: string; fg?: string; bg?: string }
+const CLAWD_W = 11  // his width, in cells
+const AIR_H = 8  // the pixel rows: four rows of cells
+const FRAME_MS = 250
+const EYE = '#1f1e1d'
+const SWEAT_HEX = '#8fd0ff'
+const DUST_HEX = '#e2d8ca'
+const CONFETTI_HEX = ['#ffd23f', '#5aa55a', '#7fc4ff', '#ff8cc6', '#b48cff']
+const CONFETTI_X = [-4, -1, 1, 4, 6, 9, -3, 3]  // where the bits fall, from his left edge
+
+export const clawdRows = (job: Job, t: number): Cell[][] => {
+  const p = progressOf(job, t)
+  const k = Math.floor(t / FRAME_MS)
+  const isAsleep = p.mood === 'sleep'
+  const isDone = p.mood === 'done'
+  const colour = p.mood === 'over' ? RED : ORANGE
+  // he stands over the end of the filled part, inside the bar; asleep, at its start
+  const lead = isAsleep ? 0 : Math.round(Math.min(p.share, 1) * (BAR_CELLS - CLAWD_W))
+  const px: Array<Array<string | undefined>> = Array.from({ length: AIR_H }, () => Array<string | undefined>(BAR_CELLS).fill(undefined))
+  const put = (x: number, y: number, c: string) => { if (x >= 0 && x < BAR_CELLS && y >= 0 && y < AIR_H) px[y][x] = c }
+  const elapsed = (job.doneAt ?? t) - job.startedAt
+  const e = job.expectedMs ?? 0
+  const step = isAsleep || isDone ? { lifted: [] as number[], up: false } : STEPS[k % STEPS.length]
+  // a hop half way, as on the desktop; done, he jumps every other frame
+  const isUp = isDone ? k % 2 === 1 : e > 0 && elapsed >= 0.5 * e && elapsed < 0.5 * e + 500
+  const y0 = isUp ? 0 : step.up ? 1 : 2  // his head's pixel row
+  CLAWD_BODY.forEach((r, y) => [...r].forEach((c, x) => { if (c !== '.') put(lead + x, y0 + y, c === 'E' ? EYE : colour) }))
+  // the legs from under him to the ground, a lifted one a pixel short; in the air they hang two pixels
+  LEG_X.forEach((x, i) => {
+    const foot = isUp ? y0 + 5 : step.lifted.includes(i) ? AIR_H - 2 : AIR_H - 1
+    for (let y = y0 + CLAWD_BODY.length; y <= foot; y++) put(lead + x, y, colour)
+  })
+  // sweat past the usual time: a drop at each side of his head, running down to his arms, then gone, the two in turn
+  if (p.mood === 'over') [2, 8].forEach((x, i) => { const fall = (k + 2 * i) % 4; if (fall < 3) put(lead + x, y0 + fall, SWEAT_HEX) })
+  if (isDone) CONFETTI_X.forEach((x, i) => {
+    const y = (k + 3 * i) % AIR_H
+    if (px[y][lead + x] === undefined) put(lead + x, y, CONFETTI_HEX[i % CONFETTI_HEX.length])
+  })
+  const rows: Cell[][] = Array.from({ length: AIR_H / 2 }, (_, row) => px[2 * row].map((top, x) => {
+    const bottom = px[2 * row + 1][x]
+    return top === undefined ? (bottom === undefined ? { ch: ' ' } : { ch: '▄', fg: bottom })
+      : bottom === undefined ? { ch: '▀', fg: top } : top === bottom ? { ch: '█', fg: top } : { ch: '▀', fg: top, bg: bottom }
+  }))
+  const say = (x: number, row: number, cell: Cell) => { if (rows[row][x]?.ch === ' ') rows[row][x] = cell }
+  // dust behind his back foot at each footfall; a z beside his head while he dozes, there one second in two
+  if (!isAsleep && !isDone && !step.up) say(lead + (k % 4 === 0 ? 1 : 0), AIR_H / 2 - 1, { ch: '░', fg: DUST_HEX })
+  if (isAsleep && Math.floor(t / 1000) % 2 === 0) say(lead + CLAWD_W + 1, 1, { ch: 'z', fg: FILL_HEX.sleep })
+  return rows
+}
+
+// A row of cells as runs of one look, the blanks as boxes of their width (a terminal row is laid out in cells).
+const runsOf = (row: Cell[]): Array<Cell & { n: number }> => {
+  const runs: Array<Cell & { n: number }> = []
+  for (const c of row) {
+    const last = runs[runs.length - 1]
+    if (last !== undefined && last.fg === c.fg && last.bg === c.bg && (last.ch.trim() === '') === (c.ch === ' ')) {
+      last.ch += c.ch
+      last.n++
+    } else runs.push({ ...c, n: 1 })
+  }
+  return runs
+}
 
 // The functions `$` is handed to are top-level declarations (the engine follows `$` only into those).
 let tick: { cancel: () => void } | null = null
@@ -353,7 +414,7 @@ async function onTick($: EngineInterface): Promise<void> {
   const t = await $.clock.now()
   await update($, now, () => t)
   const stale = (j: Job) => j.doneAt !== undefined && t - j.doneAt >= DONE_SHOW_MS
-  if ((await read($, jobs)).some(stale)) await update($, jobs, all => all.filter(j => !stale(j)))  // (a write each second redrew the band each second)
+  if ((await read($, jobs)).some(stale)) await update($, jobs, all => all.filter(j => !stale(j)))  // (a write each tick redrew the band each tick)
   // a job's estimate is looked up again on the first tick after a (re)load, and while it has none: another run may have taught it
   for (const j of await read($, jobs)) {
     if (j.expectedMs === null || !rechecked.has(j.id)) {
@@ -381,9 +442,10 @@ async function onTick($: EngineInterface): Promise<void> {
   }
 }
 
-// The one-second clock; a reload drops the old module's timer, so `session.start` (run again by a reload) calls this too.
+// The clock, a tick each FRAME_MS for the terminal's Clawd (the desktop's picture does not follow it); a reload drops the old
+// module's timer, so `session.start` (run again by a reload) calls this too.
 function ensureTick($: EngineInterface): void {
-  if (tick === null) tick = $.clock.every(1000, () => onTick($))
+  if (tick === null) tick = $.clock.every(FRAME_MS, () => onTick($))
 }
 
 async function start($: EngineInterface, job: Job): Promise<void> {
@@ -531,7 +593,7 @@ export const register: Register = on => {
     const { Box, Button, Text, Svg } = $.ui.resolve(e) as any
     // the picture on the desktop; the terminal's table has no Svg, but what resolve hands back there is not undefined either
     const isPicture = e.surface !== 'terminal' && Svg !== undefined
-    // the terminal redraws each second by `now`; the desktop's picture animates itself, so it reads the clock without subscribing
+    // the terminal redraws each tick by `now`; the desktop's picture animates itself, so it reads the clock without subscribing
     const t = isPicture ? await $.clock.now() : await read($, now)
     const visible = list.filter(j => isShown(j, t))
     if (visible.length === 0) return next(e)
@@ -550,17 +612,17 @@ export const register: Register = on => {
             )
           }
           const isAsleep = p.mood === 'sleep'
-          const clawd = p.mood === 'done' || isAsleep ? CLAWD_TEXT[0] : CLAWD_TEXT[Math.floor(t / 1000) % 2]
-          // the cells before Clawd: he stands over the end of the filled part, and always inside the bar's width
-          const lead = Math.round(Math.min(p.share, 1) * (BAR_CELLS - CLAWD_CELLS - (isAsleep ? 2 : 0)))
           const sweepLead = Math.round(p.share * (BAR_CELLS - 2))
           return (
             <Box key={job.id} flexDirection="column">
-              {/* the bar is laid out in cells, not drawn in characters: a constant length whatever the font */}
-              <Box width={BAR_CELLS}>
-                {lead > 0 ? <Box width={lead}><Text> </Text></Box> : null}
-                <Text bold color={p.mood === 'over' ? RED : ORANGE}>{clawd}{isAsleep ? ' z' : ''}</Text>
-              </Box>
+              {/* Clawd and the bar are laid out in cells, not drawn in characters: a constant length whatever the font */}
+              {clawdRows(job, t).map((row, y) => (
+                <Box key={y} width={BAR_CELLS}>
+                  {runsOf(row).map((r, i) => r.ch.trim() === ''
+                    ? <Box key={i} width={r.n}><Text> </Text></Box>
+                    : <Text key={i} color={r.fg} backgroundColor={r.bg}>{r.ch}</Text>)}
+                </Box>
+              ))}
               <Box>
                 <Box width={BAR_CELLS} backgroundColor="#3a3a38">
                   {isAsleep
