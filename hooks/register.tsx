@@ -361,7 +361,8 @@ export const clawdRows = (job: Job, t: number): Cell[][] => {
   const step = isAsleep || isDone ? { lifted: [] as number[], up: false } : STEPS[k % STEPS.length]
   // a hop half way, as on the desktop; done, he jumps every other frame
   const isUp = isDone ? k % 2 === 1 : e > 0 && elapsed >= 0.5 * e && elapsed < 0.5 * e + 500
-  const y0 = isUp ? 0 : step.up ? 1 : 2  // his head's pixel row
+  // his head's pixel row; no bob on the passes, as a pixel up (the desktop's is a fraction of one) stretched his legs by half
+  const y0 = isUp ? 0 : 2
   CLAWD_BODY.forEach((r, y) => [...r].forEach((c, x) => { if (c !== '.') put(lead + x, y0 + y, c === 'E' ? EYE : colour) }))
   // the legs from under him to the ground, a lifted one a pixel short; in the air they hang two pixels
   LEG_X.forEach((x, i) => {
