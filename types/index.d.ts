@@ -7,6 +7,8 @@ export type Job = {
   /** the subagent loop the call runs in; absent on the main loop, whose calls never outlast its turn */
   agentId?: string
   label: string
+  /** a background shell job's command line: a turn's end lists its task by it, where the call's words gave no id */
+  command?: string
   /** the history key its duration is learned under */
   key: string
   startedAt: number

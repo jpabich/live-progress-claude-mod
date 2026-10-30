@@ -886,6 +886,115 @@ describe('what a run teaches and when a job goes', () => {
     })
   })
 
+  describe('turn-end lists, the session end, the × and the status command', () => {
+    const shellTask = (id: string, command: string) => ({ id, type: 'shell', status: 'running', description: '', command })
+    // background commands whose words give no id: the call's id stands in for the task's
+    const quietLaunch = (on: Parameters<Body>[1], learned: Record<string, { ms: number; at: number }> = {}, said = 'started') => {
+      const clock = mock.clock(on, { now: 1_000_000 })
+      mock.store(on, learned)
+      engineBand(on)
+      on('classic.Stop', () => ({}))
+      on('classic.SubagentStop', () => ({}))
+      on('agent.list', () => ({ value: [] }))
+      const calls: string[] = []
+      on('tool.call', async (_, e) => {
+        calls.push(e.tool_use_id)
+        if ((e as { run_in_background?: boolean }).run_in_background === true) return { result: {}, text: said }
+        await clock.sleep(60_000)
+        return { result: {}, text: 'ok' }
+      })
+      return { clock, calls }
+    }
+
+    test("a subagent's turn-end list drops a job it no longer lists", async ($, on) => {
+      const { clock } = quietLaunch(on, {}, 'Command running in background with ID: bg-1')
+      await $.tool.call({ tool: 'Bash', command: './quiet.sh', run_in_background: true })
+      await clock.advance(6_000)
+      await $.classic.SubagentStop({ stop_hook_active: false, agent_id: 'a1', agent_transcript_path: '', agent_type: 'Explore', background_tasks: [] })
+      await clock.advance(11_000)
+      expect(await shows($, /quiet\.sh/)).toBe(false)
+    })
+
+    test('a job whose id went unread takes its task id by its command line, and ends by its notification', async ($, on) => {
+      const { clock } = quietLaunch(on)
+      await $.tool.call({ tool: 'Bash', command: './quiet.sh --long', run_in_background: true })
+      await clock.advance(6_000)
+      await $.classic.Stop({ stop_hook_active: false, background_tasks: [shellTask('bg-7', './quiet.sh --long')] })
+      await notify($, ['bg-7', 'completed'])
+      await clock.advance(4_000)
+      expect(await shows($, /quiet\.sh/)).toBe(false)
+      const again = $.tool.call({ tool: 'Bash', command: './quiet.sh --long' })
+      await clock.settle()
+      expect(await shows($, /ETA 6s/)).toBe(true)  // taught
+      await clock.advance(60_000)
+      await again
+    })
+
+    test('a command the list cut is matched by the part it kept; two jobs of one command are told apart by neither', async ($, on) => {
+      const { clock } = quietLaunch(on)
+      const long = `./quiet.sh ${'x'.repeat(1200)}`
+      await $.tool.call({ tool: 'Bash', command: long, run_in_background: true })
+      await $.tool.call({ tool: 'Bash', command: './twin.sh', run_in_background: true })
+      await $.tool.call({ tool: 'Bash', command: './twin.sh', run_in_background: true })
+      await clock.advance(6_000)
+      const cut = `${long.slice(0, 1000)}... [+${long.length - 1000} chars]`
+      await $.classic.Stop({ stop_hook_active: false, background_tasks: [shellTask('bg-7', cut), shellTask('bg-8', './twin.sh'), shellTask('bg-9', './twin.sh')] })
+      await notify($, ['bg-7', 'completed'], ['bg-8', 'completed'])
+      await clock.advance(4_000)
+      expect(await shows($, /quiet\.sh/)).toBe(false)
+      expect(await shows($, /twin\.sh/)).toBe(true)  // neither twin took bg-8
+    })
+
+    test('the session ending drops its jobs and shows the band again', async ($, on) => {
+      const { clock } = quietLaunch(on)
+      on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+      const run = $.tool.call({ tool: 'Bash', command: './build.sh' })
+      await clock.advance(3_000)
+      const ui = await $.ui.mount(BAND)
+      await ui.press({ key: 'hide' })
+      await ui.unmount()
+      await $.session.end({ reason: 'clear', sessionId: 's1', resume: {} } as never)
+      const next = $.tool.call({ tool: 'Bash', command: './next.sh' })
+      await clock.advance(3_000)
+      expect(await shows($, /build\.sh/)).toBe(false)
+      expect(await shows($, /next\.sh/)).toBe(true)  // not hidden
+      await clock.advance(60_000)
+      await Promise.all([run, next])
+    })
+
+    test("the × drops a job at once, teaching nothing, on the terminal and the desktop", async ($, on) => {
+      const { clock, calls } = quietLaunch(on)
+      const first = $.tool.call({ tool: 'Bash', command: './build.sh' })
+      const second = $.tool.call({ tool: 'Bash', command: './other.sh' })
+      await clock.advance(3_000)
+      for (const [surface, i, label] of [['terminal', 0, /build\.sh/], ['desktop', 1, /other\.sh/]] as const) {
+        const ui = await $.ui.mount({ ...BAND, surface })
+        await ui.press({ key: `drop:${calls[i]}` })
+        expect(await ui.find({ type: 'Text', text: label })).toBeUndefined()
+        await ui.unmount()
+      }
+      await clock.advance(60_000)
+      await Promise.all([first, second])
+      const again = $.tool.call({ tool: 'Bash', command: './build.sh' })
+      await clock.advance(2_500)
+      expect(await shows($, /no ETA yet/)).toBe(true)
+      await clock.advance(60_000)
+      await again
+    })
+
+    test('the status command tells the jobs, their ids and the last turn-end list', async ($, on) => {
+      const { clock, calls } = quietLaunch(on, { 'd7:Bash:quiet.sh': { ms: 10_000, at: 0 } })
+      await $.tool.call({ tool: 'Bash', command: './quiet.sh', run_in_background: true })
+      await clock.advance(6_000)
+      await $.classic.Stop({ stop_hook_active: false, background_tasks: [shellTask('other', './else.sh')] })
+      const { text } = await $.command.run({ command: 'live-progress-status' })
+      expect(text).toMatch(/taskHooks on, band shown/)
+      expect(text).toContain(`background ${calls[0]}: Bash: ./quiet.sh`)
+      expect(text).toMatch(/usually 10s, running/)
+      expect(text).toMatch(/Turn-end list \(0s ago\):\n {2}shell other: running/)
+    })
+  })
+
   test('the terminal band shows as many jobs as fit its rows, the latest', async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
     mock.store(on, { 'd7:Bash:one.sh': { ms: 600_000, at: 0 }, 'd7:Bash:two.sh': { ms: 600_000, at: 0 }, 'd7:Bash:three.sh': { ms: 600_000, at: 0 } })
@@ -958,6 +1067,36 @@ test('a typed prompt shows the hidden band again', async ($, on) => {
   await ui.press({ key: 'hide' })
   expect(await ui.find({ type: 'Text', text: /build\.sh/ })).toBeUndefined()
   await $.prompt.submit({ text: 'go on', asUser: true })
+  expect(await ui.find({ type: 'Text', text: /build\.sh/ })).toBeDefined()
+  await ui.unmount()
+  await clock.advance(10_000)
+  await run
+})
+
+test("Hide holds on the desktop too, through a notification's turn, until the person's next prompt", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on, { 'd7:Bash:build.sh': { ms: 60_000, at: 0 } })
+  on('tool.call', async () => {
+    await clock.sleep(10_000)
+    return { result: {}, text: 'ok' }
+  })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+  const run = $.tool.call({ tool: 'Bash', command: './build.sh' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /build\.sh/ })).toBeDefined()
+  await ui.press({ key: 'hide' })
+  expect(await ui.find({ type: 'Text', text: /build\.sh/ })).toBeUndefined()
+  expect(JSON.stringify(await ui.drawn())).toContain('engine')  // the engine's own band in its place
+  await deliver($, noticeOf(['bg-1', 'completed']))
+  expect(await ui.find({ type: 'Text', text: /build\.sh/ })).toBeUndefined()
+  await $.prompt.submit({ text: 'from a plugin', origin: { kind: 'plugin', name: 'other' } })
+  expect(await ui.find({ type: 'Text', text: /build\.sh/ })).toBeUndefined()
+  await $.prompt.submit({ text: 'go on', origin: { kind: 'composer' } })
   expect(await ui.find({ type: 'Text', text: /build\.sh/ })).toBeDefined()
   await ui.unmount()
   await clock.advance(10_000)

@@ -438,8 +438,15 @@ const spawned = new Map<string, string>()  // an Agent call still running → th
 // list or two main-loop answered turns without one (an interrupted or failed turn raises no Stop, so it does not count).
 let hooksTasks = true
 let listed: Set<string> | null = null  // the ids the last `classic.Stop` listed in flight; null until one is heard
+let lastList: { at: number; tasks: Array<{ id: string; type: string; status: string }> } | null = null  // that list, for the status command
 let answeredTurns = 0
 const unlisted = new Map<string, number>()  // a background job a turn's end no longer lists → when: it goes UNLISTED_GRACE_MS later
+function forgetLists(): void {
+  listed = null
+  lastList = null
+  answeredTurns = 0
+  unlisted.clear()
+}
 
 // Learned durations live under STORE, keyed by keyOf, each `{ ms, at }`: the typical duration and when it was last taught. A change
 // to what keyOf makes of a command takes a new prefix; session.start clears the old ones and, past MAX_KEYS, the least lately taught.
@@ -658,14 +665,42 @@ async function notLive($: EngineInterface, gone: Job[]): Promise<Job[]> {
   return gone.filter(j => !(isAgent(j) && live.has(j.id)))
 }
 
+// A background shell job whose id the call's words did not give (its id is the call's) takes its task's id from a turn's end, where
+// the list names the task by the job's command line: only one job and one task to a command, else nothing is told apart. The list
+// cuts a long command at 1000 characters with a "... [+N chars]" mark; the part before it names the job.
+type TaskSummary = { id: string; type: string; status: string; command?: string }
+const commandOf = (listedAs: string): { text: string; isCut: boolean } => {
+  const cut = /\.\.\. \[\+\d+ chars\]$/.exec(listedAs)
+  return cut === null ? { text: listedAs, isCut: false } : { text: listedAs.slice(0, cut.index), isCut: true }
+}
+async function adopt($: EngineInterface, tasks: ReadonlyArray<TaskSummary>): Promise<void> {
+  const list = await read($, jobs)
+  const unread = list.filter(j => j.kind === 'background' && j.doneAt === undefined && j.id === j.callId && j.command !== undefined)
+  if (unread.length === 0) return
+  const known = new Set(list.map(j => j.id))
+  const names = (k: TaskSummary, j: Job) => {
+    if (k.command === undefined || j.command === undefined) return false
+    const { text, isCut } = commandOf(k.command)
+    return isCut ? text.length > 0 && j.command.startsWith(text) : j.command === text
+  }
+  const shells = tasks.filter(k => k.type === 'shell' && !known.has(k.id))
+  for (const j of unread) {
+    const matches = shells.filter(k => names(k, j))
+    if (matches.length !== 1 || unread.filter(o => names(matches[0], o)).length !== 1) continue
+    await handOff($, j.id, { ...j, id: matches[0].id })
+  }
+}
+
 // At a turn's end the engine lists the background work still in flight (`classic.Stop`): a background job not on it ended without a
 // notification this mod read yet (a missed or reworded one, a task stopped), and goes UNLISTED_GRACE_MS later, teaching nothing (when
 // it ended is not known), unless its notification, delivered as the turn ends, comes first and teaches. Its id is checked against the
 // list only once another job's id is on it, or the list is empty, so a list naming tasks some other way never drops a job that still
 // runs; a subagent the engine lists as live stays (it ends by its own turn). The main loop's calls that lost their end go by
 // turn.complete.
-async function reconcile($: EngineInterface, tasks: ReadonlyArray<{ id: string }>): Promise<void> {
+async function reconcile($: EngineInterface, tasks: ReadonlyArray<TaskSummary>): Promise<void> {
   const t = await $.clock.now()
+  lastList = { at: t, tasks: tasks.map(k => ({ id: k.id, type: k.type, status: k.status })) }
+  await adopt($, tasks)
   const live = new Set(tasks.map(k => k.id))
   listed = live
   const running = (await read($, jobs)).filter(j => j.kind === 'background' && j.doneAt === undefined && t - j.startedAt > LOST_AFTER_MS)
@@ -673,6 +708,16 @@ async function reconcile($: EngineInterface, tasks: ReadonlyArray<{ id: string }
   for (const j of running) if (live.has(j.id)) unlisted.delete(j.id)
   const gone = await notLive($, running.filter(j => !live.has(j.id) && (live.size === 0 || (idsMatch && j.id !== j.callId))))
   for (const j of gone) if (!unlisted.has(j.id)) unlisted.set(j.id, t)
+}
+
+// A turn-end list, the main loop's (`classic.Stop`) or a subagent's (`classic.SubagentStop`); a failure here is the mod's alone
+// (after `next`), and the next list or the time bound ends the job.
+async function readList($: EngineInterface, tasks: ReadonlyArray<TaskSummary> | undefined): Promise<void> {
+  try {
+    if (Array.isArray(tasks)) await reconcile($, tasks)
+  } catch {
+    // as above
+  }
 }
 
 // A loop's turn ended: the main loop's or a subagent's calls still here lost their end and go.
@@ -685,6 +730,41 @@ async function drop($: EngineInterface, gone: Job[]): Promise<void> {
   if (gone.length === 0) return
   for (const j of gone) asked.delete(j.id)
   await update($, jobs, all => all.filter(j => !gone.some(g => g.id === j.id)))
+}
+
+// The person's × on a job: it goes at once, teaching nothing; its end, if it comes, finds it gone. By its band key (the call's id),
+// which a hand-off to its background task keeps.
+async function dismiss($: EngineInterface, key: string): Promise<void> {
+  await drop($, (await read($, jobs)).filter(j => j.id === key || j.callId === key))
+}
+
+// What the band holds against what the engine lists, for the status command: why a job stays, or went.
+async function statusOf($: EngineInterface): Promise<string> {
+  const t = await $.clock.now()
+  const ago = (at: number) => `${Math.round((t - at) / 1000)}s ago`
+  const list = await read($, jobs)
+  const lines = [`live-progress: taskHooks ${hooksTasks ? 'on' : 'off'}, band ${(await read($, isHidden)) ? 'hidden' : 'shown'}`]
+  lines.push(list.length === 0 ? 'Jobs: none' : `Jobs (${list.length}):`)
+  for (const j of list) {
+    const state = j.doneAt !== undefined ? `done ${ago(j.doneAt)}`
+      : unlisted.has(j.id) ? `unlisted ${ago(unlisted.get(j.id) as number)}, goes ${UNLISTED_GRACE_MS / 1000}s after`
+      : isStuck(j, t) ? 'past the time bound' : 'running'
+    const ids = j.callId !== undefined && j.callId !== j.id ? `${j.id} (call ${j.callId})` : j.id
+    const expected = j.expectedMs === null ? 'first run' : `usually ${Math.round(j.expectedMs / 1000)}s`
+    lines.push(`  ${j.kind} ${ids}: ${j.label}, started ${ago(j.startedAt)}, ${expected}, ${state}`)
+  }
+  const known = hooksTasks ? lastList : null
+  if (known === null) lines.push(hooksTasks ? 'Turn-end list: none heard yet' : 'Turn-end list: not read (taskHooks off)')
+  else {
+    lines.push(`Turn-end list (${ago(known.at)}):${known.tasks.length === 0 ? ' empty' : ''}`)
+    for (const k of known.tasks) lines.push(`  ${k.type} ${k.id}: ${k.status}`)
+  }
+  const agents = await $.agent.list().catch(() => [])
+  if (agents.length > 0) {
+    lines.push('Agents:')
+    for (const a of agents) lines.push(`  ${a.id} ${a.description}: ${a.status}`)
+  }
+  return lines.join('\n')
 }
 
 // A client came or went: the desktop loads the band's frames again when it shows the session again, so the pictures are made anew.
@@ -703,16 +783,34 @@ export const register: Register = (on, options) => {
   const wantsClawd = options.clawd !== false  // the `clawd` option: off, the terminal draws each job as its bar and label alone
   // the `taskHooks` option, and what its hooks heard: a registration with the option changed starts afresh
   hooksTasks = options.taskHooks !== false
-  listed = null
-  answeredTurns = 0
+  forgetLists()
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     if ((await read($, jobs)).length > 0) ensureTick($)  // jobs begun before a reload go on ticking
     await update($, redraw, n => n + 1)  // the band drawn again by the new code
     await tidyStore($)
+    await $.command.register({ name: 'live-progress-status', description: 'Show what live-progress tracks and what Claude Code lists as running', immediate: true })
+      .catch(() => undefined)
     return r
   })
+
+  // The conversation ends (an exit, a resume elsewhere, a /clear, which raises no session.start): its jobs go with it, teaching
+  // nothing, and the band shows again for the next one.
+  on('session.end', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      await drop($, await read($, jobs))
+      if (await read($, isHidden)) await update($, isHidden, () => false)
+      spawned.clear()
+      forgetLists()
+    } catch {
+      // the next one's jobs replace them
+    }
+    return r
+  }).catch(($, e, next) => next(e))
+
+  on('command.run', { command: 'live-progress-status' }, async $ => ({ text: await statusOf($) }))
 
   on('session.attach', async ($, e, next) => {
     const r = await next(e)
@@ -759,7 +857,8 @@ export const register: Register = (on, options) => {
         // the call returned while its work goes on as a background task (asked for, Ctrl+B, a timeout), until its notification, its
         // subagent's turn end, a TaskStop, or far past its usual time
         const id = agentId ?? backgroundIdOf(ran) ?? callId
-        await handOff($, callId, { id, callId, kind: 'background', label, key, startedAt, expectedMs, agentId: e.agentId })
+        const command = tool === 'Bash' && typeof args.command === 'string' ? args.command : undefined
+        await handOff($, callId, { id, callId, kind: 'background', label, key, startedAt, expectedMs, agentId: e.agentId, command })
       } else {
         await finish($, callId, !failed)
       }
@@ -804,13 +903,17 @@ export const register: Register = (on, options) => {
       return r
     }).catch(($, e, next) => next(e))
 
+    // A turn's end, the main loop's or a subagent's: each lists the session's background work in flight, so a stale job also goes
+    // while the main loop waits on its subagents.
     on('classic.Stop', async ($, e, next) => {
       const r = await next(e)
-      try {
-        if (Array.isArray(e.background_tasks)) await reconcile($, e.background_tasks)
-      } catch {
-        // the next turn's end or the time bound ends the job
-      }
+      await readList($, e.background_tasks)
+      return r
+    }).catch(($, e, next) => next(e))
+
+    on('classic.SubagentStop', async ($, e, next) => {
+      const r = await next(e)
+      await readList($, e.background_tasks)
       return r
     }).catch(($, e, next) => next(e))
   }
@@ -865,7 +968,11 @@ export const register: Register = (on, options) => {
             return (
               <Box key={key} flexDirection="column">
                 <Svg source={pictureOf(job, t)} alt="Clawd walking along the job's progress bar" height={CLAWD_H} isInteractive />
-                <Text dimColor>{job.label}</Text>
+                <Box>
+                  <Button key={`drop:${key}`} label="×" plain dimColor onPress={() => dismiss($, key)} />
+                  <Text> </Text>
+                  <Text dimColor>{job.label}</Text>
+                </Box>
               </Box>
             )
           }
@@ -893,7 +1000,11 @@ export const register: Register = (on, options) => {
                 <Text> </Text>
                 <Text bold color={FILL_HEX[p.mood]}>{p.words}{p.mood === 'run' || p.mood === 'near' ? ` · ends ${hhmm(job.startedAt + (job.expectedMs as number))}` : ''}</Text>
               </Box>
-              <Text dimColor>{job.label}</Text>
+              <Box>
+                <Button key={`drop:${key}`} label="×" plain dimColor onPress={() => dismiss($, key)} />
+                <Text> </Text>
+                <Text dimColor>{job.label}</Text>
+              </Box>
             </Box>
           )
         })}

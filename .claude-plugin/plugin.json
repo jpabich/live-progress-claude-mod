@@ -1,6 +1,6 @@
 {
   "name": "live-progress",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "A band above the prompt: what runs now (tool calls, background builds and tests, subagents) with a progress bar by learned ETA, redrawn locally, no model tokens.",
   "author": { "name": "Jerzy Pabich" },
   "types": "./types/index.d.ts",
@@ -15,7 +15,7 @@
     "taskHooks": {
       "type": "boolean",
       "title": "Quick end of background tasks",
-      "description": "Also hook session.append and classic.Stop, so a background task leaves the band as soon as it ends, also when its notification comes during a turn. Turn off where a managed plugin makes Claude Code show 'live-progress … hook was skipped' lines: background tasks then end on notifications between turns, or far past their usual time.",
+      "description": "Also hook session.append, classic.Stop and classic.SubagentStop, so a background task leaves the band soon after it ends, also when no notification the mod can read comes. Turn off where a managed plugin makes Claude Code show 'live-progress … hook was skipped' lines: background tasks then end on their notification, or far past their usual time.",
       "default": true
     }
   }
